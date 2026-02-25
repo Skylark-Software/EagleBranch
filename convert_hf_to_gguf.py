@@ -11429,8 +11429,40 @@ class MistralMoeModel(DeepseekV2Model):
         config["norm_topk_prob"] = True
         config["scoring_func"] = "softmax"
 
+        # Detect EAGLE-3 draft model (1 layer + eagle_linear tensor)
+        self.is_eagle3 = False
+        if config.get("num_hidden_layers", config.get("n_layers", 0)) == 1:
+            # Check for eagle_linear tensor in safetensors
+            for path in self.dir_model.glob("*.safetensors"):
+                import struct as _struct
+                with open(path, 'rb') as f:
+                    hlen = _struct.unpack('<Q', f.read(8))[0]
+                    header = json.loads(f.read(hlen))
+                if "eagle_linear.weight" in header:
+                    self.is_eagle3 = True
+                    break
+            if self.is_eagle3:
+                self.model_arch = gguf.MODEL_ARCH.EAGLE3_DS
+                logger.info("Detected EAGLE-3 DeepSeek/Mistral draft model, switching to EAGLE3_DS architecture")
+                self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+                self.gguf_writer.arch = gguf.MODEL_ARCH_NAMES[self.model_arch]
+                self.gguf_writer.add_architecture()
+                if not hasattr(self, 'target_model_dir') or not self.target_model_dir:
+                    raise ValueError(
+                        "EAGLE3_DS model requires --target-model-dir to be specified. "
+                        "Please provide the path to the target model directory."
+                    )
+
     def set_vocab(self):
-        self._set_vocab_mistral()
+        if self.is_eagle3:
+            # Use tokenizer from target model
+            logger.info(f"EAGLE-3 DS: Using tokenizer from target model: {self.target_model_dir}")
+            original_dir_model = self.dir_model
+            self.dir_model = self.target_model_dir
+            self._set_vocab_mistral()
+            self.dir_model = original_dir_model
+        else:
+            self._set_vocab_mistral()
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
@@ -11443,24 +11475,130 @@ class MistralMoeModel(DeepseekV2Model):
         # ref https://github.com/ggml-org/llama.cpp/pull/17945
         self.gguf_writer.add_rope_scaling_yarn_log_mul(0.1) # mscale_all_dim * 0.1
 
+        if self.is_eagle3:
+            # Read target model config for extract_layers
+            with open(self.target_model_dir / "params.json", 'r', encoding='utf-8') as f:
+                target_config = json.load(f)
+            target_num_layers = target_config.get("n_layers", target_config.get("num_hidden_layers", 62))
+            hidden_size = self.hparams["hidden_size"]
+
+            # Determine extraction layers from eagle_linear shape
+            # eagle_linear.weight shape is [hidden_size, N * hidden_size]
+            # N = number of extraction layers (2 for Mistral Large 3)
+            n_extract = 1
+            for path in self.dir_model.glob("*.safetensors"):
+                import struct as _struct
+                with open(path, 'rb') as f:
+                    hlen = _struct.unpack('<Q', f.read(8))[0]
+                    header = json.loads(f.read(hlen))
+                if "eagle_linear.weight" in header:
+                    fc_shape = header["eagle_linear.weight"]["shape"]
+                    n_extract = fc_shape[1] // hidden_size
+                    break
+            logger.info(f"EAGLE3_DS: n_extract_layers = {n_extract}")
+
+            if n_extract == 2:
+                extract_layers = [2, target_num_layers - 3]
+            else:
+                extract_layers = [2, target_num_layers // 2, target_num_layers - 3]
+
+            logger.info(f"EAGLE3_DS: extract_layers = {extract_layers} (target model has {target_num_layers} layers)")
+            self.gguf_writer.add_array(f"{self.gguf_writer.arch}.extract_layers", extract_layers)
+            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.target_hidden_size", hidden_size)
+
+    _eagle3_scales: dict[str, Tensor] | None = None
+
+    def _eagle3_dequant(self, data_torch: Tensor, name: str) -> Tensor:
+        """Dequantize FP8 tensor to float16 using its weight scale.
+
+        NOTE: prepare_tensors() converts non-f16/f32 dtypes to f32 BEFORE
+        modify_tensors is called, so FP8 tensors arrive here as f32 with raw
+        FP8 range values (-448..448). Only call this for tensors with scales.
+        """
+        # Force eager evaluation to ensure nan_to_num and scale multiply work
+        if isinstance(data_torch, LazyTorchTensor):
+            data_torch = LazyTorchTensor.to_eager(data_torch)
+        data_f32 = data_torch.to(torch.float32)
+        data_f32 = torch.nan_to_num(data_f32, nan=0.0)
+        scale = self._eagle3_scales[name]
+        if isinstance(scale, LazyTorchTensor):
+            scale = LazyTorchTensor.to_eager(scale)
+        data_f32 = data_f32 * scale.to(torch.float32)
+        return data_f32.to(torch.float16)
+
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+        import re
+
         if name.startswith("vision_") or name.startswith("patch_merger.") or "mm_projector" in name:
             return
 
-        # rename certain tensors so that we can reuse DeepseekV2Model modify_tensors logic
-        if name.endswith(".qscale_act"):
-            name = name.replace(".qscale_act", ".input_scale")
-        if name.endswith(".qscale_weight"):
-            name = name.replace(".qscale_weight", ".weight_scale")
-        if ".wkv_b." in name:
-            name = name.replace(".wkv_b.", ".kv_b_proj.")
-        if ".experts." in name:
-            name = name.replace(".experts.", ".mlp.experts.")
-            name = name.replace(".w1.", ".gate_proj.")
-            name = name.replace(".w2.", ".down_proj.")
-            name = name.replace(".w3.", ".up_proj.")
-            name = "model." + name
+        # Collect FP8 weight scales for EAGLE3 dequantization (must come before weight handling)
+        if self.is_eagle3 and name.endswith(".qscale_weight"):
+            if self._eagle3_scales is None:
+                self._eagle3_scales = {}
+            base_name = name.replace(".qscale_weight", ".weight")
+            self._eagle3_scales[base_name] = data_torch
+            return
 
+        # Skip activation scales for EAGLE3
+        if self.is_eagle3 and name.endswith(".qscale_act"):
+            return
+
+        # For EAGLE3, dequantize FP8 tensors using weight scale (only if scale exists)
+        if self.is_eagle3 and self._eagle3_scales and name in self._eagle3_scales:
+            data_torch = self._eagle3_dequant(data_torch, name)
+
+        # Handle EAGLE-3 eagle_linear -> fc.weight rename
+        if self.is_eagle3 and name.startswith("eagle_linear."):
+            if name == "eagle_linear.weight":
+                name = "fc.weight"
+                yield (self.map_tensor_name(name), data_torch)
+            return
+
+        # Rename FP8 scale/weight tensors for non-EAGLE3 Mistral MoE models
+        if not self.is_eagle3:
+            if name.endswith(".qscale_act"):
+                name = name.replace(".qscale_act", ".input_scale")
+            if name.endswith(".qscale_weight"):
+                name = name.replace(".qscale_weight", ".weight_scale")
+
+        # Handle per-expert tensors: collect and merge into 3D stacked tensors
+        # Input: layers.{bid}.experts.{xid}.w{1,2,3}.weight
+        # Output: layers.{bid}.feed_forward.experts.w{1,2,3}.weight (Mistral merged format)
+        expert_match = re.match(r'layers\.(\d+)\.experts\.(\d+)\.(w[123])\.weight', name)
+        if expert_match:
+            layer_id = int(expert_match.group(1))
+            expert_id = int(expert_match.group(2))
+            wname = expert_match.group(3)
+
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+
+            self._experts[layer_id][(expert_id, wname)] = data_torch
+
+            n_experts = self.hparams.get("n_routed_experts", self.hparams.get("num_experts", 128))
+            if len(self._experts[layer_id]) >= n_experts * 3:
+                for wn in ["w1", "w2", "w3"]:
+                    datas = []
+                    for xid in range(n_experts):
+                        datas.append(self._experts[layer_id][(xid, wn)])
+                        del self._experts[layer_id][(xid, wn)]
+                    merged = torch.stack(datas, dim=0)
+                    # Use Mistral merged format: layers.{bid}.feed_forward.experts.w{N}
+                    merged_name = f"layers.{layer_id}.feed_forward.experts.{wn}.weight"
+                    yield from super().modify_tensors(merged, merged_name, bid)
+            return
+
+        # For EAGLE3, rename wkv_b to kv_b_proj so DeepseekV2Model.modify_tensors
+        # can do the MLA split (k_b_proj + v_b_proj) for absorption optimization
+        if self.is_eagle3 and ".attention.wkv_b." in name:
+            name = name.replace("layers.", "model.layers.")
+            name = name.replace(".attention.wkv_b.", ".self_attn.kv_b_proj.")
+            yield from super().modify_tensors(data_torch, name, bid)
+            return
+
+        # All other tensors (gate, shared_experts, attention, norms) use
+        # native Mistral-format names which are already in tensor_mapping.py
         yield from super().modify_tensors(data_torch, name, bid)
 
 

@@ -133,6 +133,7 @@ enum llm_arch {
     LLM_ARCH_KIMI_LINEAR,
     LLM_ARCH_UNKNOWN,
     LLM_ARCH_EAGLE3,
+    LLM_ARCH_EAGLE3_DS,
 };
 
 enum llm_kv {

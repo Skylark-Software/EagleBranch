@@ -477,6 +477,7 @@ class MODEL_ARCH(IntEnum):
     PANGU_EMBED      = auto()
     MISTRAL3         = auto()
     EAGLE3           = auto()
+    EAGLE3_DS        = auto()
     PADDLEOCR        = auto()
     MIMO2            = auto()
     STEP35           = auto()
@@ -924,6 +925,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.PANGU_EMBED:      "pangu-embedded",
     MODEL_ARCH.MISTRAL3:         "mistral3",
     MODEL_ARCH.EAGLE3:           "eagle3",
+    MODEL_ARCH.EAGLE3_DS:        "eagle3_ds",
     MODEL_ARCH.PADDLEOCR:        "paddleocr",
     MODEL_ARCH.MIMO2:            "mimo2",
     MODEL_ARCH.STEP35:           "step35",
@@ -3533,6 +3535,32 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE,
         MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.EAGLE3_FC,
+        MODEL_TENSOR.EAGLE3_HIDDEN_NORM,
+        MODEL_TENSOR.EAGLE3_D2T,
+    ],
+    MODEL_ARCH.EAGLE3_DS: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q_A_NORM,
+        MODEL_TENSOR.ATTN_KV_A_NORM,
+        MODEL_TENSOR.ATTN_Q_A,
+        MODEL_TENSOR.ATTN_Q_B,
+        MODEL_TENSOR.ATTN_KV_A_MQA,
+        MODEL_TENSOR.ATTN_KV_B,
+        MODEL_TENSOR.ATTN_K_B,
+        MODEL_TENSOR.ATTN_V_B,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+        MODEL_TENSOR.FFN_GATE_SHEXP,
+        MODEL_TENSOR.FFN_DOWN_SHEXP,
+        MODEL_TENSOR.FFN_UP_SHEXP,
         MODEL_TENSOR.EAGLE3_FC,
         MODEL_TENSOR.EAGLE3_HIDDEN_NORM,
         MODEL_TENSOR.EAGLE3_D2T,

@@ -1145,7 +1145,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->set_inputs(&ubatch);
 
         // EAGLE3: Fill g_embeddings for decoder input
-        if (model.arch == LLM_ARCH_EAGLE3 && gtype == LLM_GRAPH_TYPE_DECODER && !eagle3.g_embeddings.empty()) {
+        if ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && gtype == LLM_GRAPH_TYPE_DECODER && !eagle3.g_embeddings.empty()) {
             ggml_tensor * g_embd = ggml_graph_get_tensor(gf, "inp_g_embeddings");
             if (g_embd) {
                 ggml_backend_tensor_set(g_embd, eagle3.g_embeddings.data(), 0, ggml_nbytes(g_embd));
@@ -1182,8 +1182,8 @@ int llama_context::encode(const llama_batch & batch_inp) {
 
     const auto & hparams = model.hparams;
 
-    // EAGLE3: use 3*target_hidden_size for concatenated features input
-    const int64_t n_embd  = (model.arch == LLM_ARCH_EAGLE3 && batch_inp.embd) ? 3 * hparams.eagle3_target_hidden_size : hparams.n_embd;
+    // EAGLE3: use n_extract*target_hidden_size for concatenated features input
+    const int64_t n_embd  = ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && batch_inp.embd) ? hparams.eagle3_n_extract * hparams.eagle3_target_hidden_size : hparams.n_embd;
     const int64_t n_vocab = model.vocab.n_tokens();
 
     // note: during encode, we always pass the full sequence starting from pos = 0
@@ -1269,7 +1269,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
                     GGML_ASSERT(embd.data != nullptr);
                     const uint32_t n_embd_out = hparams.n_embd_out();
 
-                    if (model.arch == LLM_ARCH_EAGLE3) {
+                    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) {
                         // g_embeddings are stored temporarily in embd buffer
                         const int64_t out_embd = hparams.n_embd;
                         GGML_ASSERT(n_tokens * out_embd <= (int64_t) embd.size);
@@ -1668,7 +1668,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
 
         // For EAGLE3, don't override t_embd with t_embd_pooled - we need the prenorm value during eagle3 decoder autoregressive generation
-        if (t_embd && res->get_embd_pooled() && model.arch != LLM_ARCH_EAGLE3) {
+        if (t_embd && res->get_embd_pooled() && model.arch != LLM_ARCH_EAGLE3 && model.arch != LLM_ARCH_EAGLE3_DS) {
             t_embd = res->get_embd_pooled();
         }
 
@@ -1685,7 +1685,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
 
                 // EAGLE3: Map draft vocab to target vocab
-                if (model.arch == LLM_ARCH_EAGLE3 && model.d2t) {
+                if ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && model.d2t) {
                     static thread_local std::vector<int64_t> eagle3_d2t_map;
                     static thread_local std::vector<float>   eagle3_draft_logits;
 
@@ -2089,7 +2089,7 @@ ggml_cgraph * llama_context::graph_reserve(
 
     // EAGLE3: auto-detect encoder (embeddings+no target_model) or decoder (has target_model)
     llm_graph_type gtype = LLM_GRAPH_TYPE_DEFAULT;
-    if (model.arch == LLM_ARCH_EAGLE3) {
+    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) {
         if (cparams.embeddings && model.target_tok_embd == nullptr) {
             gtype = LLM_GRAPH_TYPE_ENCODER;
         } else if (model.target_tok_embd != nullptr) {
@@ -2977,10 +2977,16 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    // Auto-setup for EAGLE3: set target embedding if target_model is provided
-    if (model->arch == LLM_ARCH_EAGLE3 && params.target_model) {
+    // Auto-setup for EAGLE3: set target embedding and output if target_model is provided
+    if ((model->arch == LLM_ARCH_EAGLE3 || model->arch == LLM_ARCH_EAGLE3_DS) && params.target_model) {
         model->target_tok_embd = params.target_model->tok_embd;
         LLAMA_LOG_INFO("%s: EAGLE3 auto-setup: using target model's embedding layer\n", __func__);
+
+        // If the draft model doesn't have its own lm_head, use the target model's
+        if (model->output == nullptr && params.target_model->output != nullptr) {
+            model->output = params.target_model->output;
+            LLAMA_LOG_INFO("%s: EAGLE3 auto-setup: using target model's output (lm_head) layer\n", __func__);
+        }
     }
 
     if (params.n_batch == 0 && params.n_ubatch == 0) {

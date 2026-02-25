@@ -2476,6 +2476,59 @@ void llama_model::load_hparams(llama_model_loader & ml) {
 
                 type = LLM_TYPE_UNKNOWN;
             } break;
+        case LLM_ARCH_EAGLE3_DS:
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+
+                // MLA hyperparameters (same as DeepSeek V2)
+                ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,   hparams.n_layer_dense_lead, false);
+                ml.get_key(LLM_KV_ATTENTION_Q_LORA_RANK,       hparams.n_lora_q);
+                ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,      hparams.n_lora_kv);
+                ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,    hparams.n_embd_head_k_mla_impl, false);
+                ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA,  hparams.n_embd_head_v_mla_impl, false);
+                ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,  hparams.n_ff_exp);
+                ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,         hparams.n_expert_shared);
+                ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,        hparams.expert_weights_scale, false);
+                ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,         hparams.expert_weights_norm, false);
+                ml.get_key(LLM_KV_EXPERT_GATING_FUNC,          hparams.expert_gating_func, false);
+
+                ml.get_key(LLM_KV_ROPE_SCALING_YARN_LOG_MUL,   hparams.rope_yarn_log_mul, false);
+                if (hparams.rope_yarn_log_mul != 0.0f) {
+                    hparams.rope_yarn_log_mul /= 0.1f;
+                }
+
+                ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_SCALE,  hparams.f_attn_temp_scale, false);
+                ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_LENGTH, hparams.n_attn_temp_floor_scale, false);
+
+                // EAGLE3_DS layer extraction configuration (supports 2 or 3 extract layers)
+                std::array<int, 4> extract_layers_tmp = {};
+                int n_extract = 0;
+                if (ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 3, false)) {
+                    n_extract = 3;
+                } else if (ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 2, false)) {
+                    n_extract = 2;
+                } else {
+                    throw std::runtime_error("EAGLE3_DS model requires 'extract_layers' in GGUF metadata");
+                }
+                std::copy_n(extract_layers_tmp.begin(), std::min(n_extract, 3), hparams.eagle3_extract_layers.begin());
+                hparams.eagle3_n_extract = n_extract;
+                if (n_extract == 2) {
+                    LLAMA_LOG_INFO("%s: EAGLE3_DS extract_layers = [%d, %d]\n", __func__,
+                                   hparams.eagle3_extract_layers[0],
+                                   hparams.eagle3_extract_layers[1]);
+                } else {
+                    LLAMA_LOG_INFO("%s: EAGLE3_DS extract_layers = [%d, %d, %d]\n", __func__,
+                                   hparams.eagle3_extract_layers[0],
+                                   hparams.eagle3_extract_layers[1],
+                                   hparams.eagle3_extract_layers[2]);
+                }
+
+                ml.get_key(LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE, hparams.eagle3_target_hidden_size);
+                LLAMA_LOG_INFO("%s: EAGLE3_DS target_hidden_size = %u (draft n_embd = %u)\n", __func__,
+                               hparams.eagle3_target_hidden_size, hparams.n_embd);
+
+                type = LLM_TYPE_UNKNOWN;
+            } break;
         case LLM_ARCH_COGVLM:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -7200,6 +7253,78 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.rope_freqs = create_tensor(tn(LLM_TENSOR_ROPE_FREQS, "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED);
                     }
                 } break;
+            case LLM_ARCH_EAGLE3_DS:
+                {
+                    const int64_t n_extract = hparams.eagle3_n_extract;
+                    const int64_t n_embd_target_features = n_extract * hparams.eagle3_target_hidden_size;
+                    const bool is_mla = hparams.is_mla();
+
+                    // MLA dimensions (same as DeepSeek V2)
+                    const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
+                    const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
+                    const int64_t n_embd_head_qk_rope = hparams.n_rot;
+                    const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
+                    const int64_t q_lora_rank  = hparams.n_lora_q;
+                    const int64_t kv_lora_rank = hparams.n_lora_kv;
+
+                    // Feature fusion layer: projects N target layers to draft hidden size
+                    fc = create_tensor(tn(LLM_TENSOR_EAGLE3_FC, "weight"), {n_embd_target_features, n_embd}, 0);
+
+                    // Output layer
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+
+                    // Token embeddings (optional)
+                    const struct ggml_tensor * tok_embd_meta = ml.get_tensor_meta(tn(LLM_TENSOR_TOKEN_EMBD, "weight").str().c_str());
+                    if (tok_embd_meta) {
+                        const int64_t n_target_vocab = tok_embd_meta->ne[1];
+                        tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_target_vocab}, 0);
+                        LLAMA_LOG_INFO("%s: EAGLE3_DS using its own token_embd (vocab = %lld)\n", __func__, (long long)n_target_vocab);
+                    }
+
+                    // Single decoder layer with MLA attention + MoE FFN
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+
+                        // EAGLE-3 specific: hidden_norm
+                        layer.eagle3_hidden_norm = create_tensor(tn(LLM_TENSOR_EAGLE3_HIDDEN_NORM, "weight", i), {n_embd}, TENSOR_NOT_REQUIRED);
+
+                        // MLA attention (DeepSeek V2 style)
+                        layer.wq_a = create_tensor(tn(LLM_TENSOR_ATTN_Q_A, "weight", i), {n_embd, q_lora_rank}, 0);
+                        layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", i), {q_lora_rank}, 0);
+                        layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q_B, "weight", i), {q_lora_rank, n_head * n_embd_head_k_mla}, 0);
+
+                        layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + n_embd_head_qk_rope}, 0);
+                        layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, 0);
+
+                        if (is_mla) {
+                            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {n_embd_head_qk_nope, kv_lora_rank, n_head}, 0);
+                            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v_mla, n_head}, 0);
+                        } else {
+                            layer.wkv_b = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i), {kv_lora_rank, n_head * (n_embd_head_qk_nope + n_embd_head_v_mla)}, 0);
+                        }
+
+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_embd_head_v_mla, n_embd}, 0);
+
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                        // MoE FFN
+                        const int64_t n_ff_exp        = hparams.n_ff_exp;
+                        const int64_t n_expert_shared = hparams.n_expert_shared;
+
+                        layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+                        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+                        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd, n_expert}, 0);
+                        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+
+                        // Shared expert
+                        layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_exp * n_expert_shared}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_exp * n_expert_shared, n_embd}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_exp * n_expert_shared}, TENSOR_NOT_REQUIRED);
+                    }
+                } break;
             case LLM_ARCH_KIMI_LINEAR:
                 {
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
@@ -8862,6 +8987,14 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
                     llm = std::make_unique<llm_build_eagle3_decode>(*this, params);
                 }
             } break;
+        case LLM_ARCH_EAGLE3_DS:
+            {
+                if (params.gtype == LLM_GRAPH_TYPE_ENCODER) {
+                    llm = std::make_unique<llm_build_eagle3_ds_encode>(*this, params);
+                } else {
+                    llm = std::make_unique<llm_build_eagle3_ds_decode>(*this, params);
+                }
+            } break;
         case LLM_ARCH_COGVLM:
             {
                 llm = std::make_unique<llm_build_cogvlm>(*this, params);
@@ -9080,6 +9213,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ERNIE4_5_MOE:
         case LLM_ARCH_MISTRAL3:
         case LLM_ARCH_EAGLE3:
+        case LLM_ARCH_EAGLE3_DS:
         case LLM_ARCH_LLAMA_EMBED:
         case LLM_ARCH_MAINCODER:
         case LLM_ARCH_GLM_DSA:
@@ -9274,6 +9408,10 @@ bool llama_model_has_encoder(const llama_model * model) {
 bool llama_model_has_decoder(const llama_model * model) {
     switch (model->arch) {
         case LLM_ARCH_T5ENCODER: return false;
+        // EAGLE3 models need a target model to decode; without it, report no decoder
+        case LLM_ARCH_EAGLE3:
+        case LLM_ARCH_EAGLE3_DS:
+            return model->target_tok_embd != nullptr;
         default:                 return true;
     }
 }

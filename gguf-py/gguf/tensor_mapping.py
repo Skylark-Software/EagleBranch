@@ -157,6 +157,13 @@ class TensorNameMap:
         MODEL_TENSOR.V_ENC_MSFA_NORM: (
             "model.vision_tower.timm_model.msfa.norm", # gemma3n
         ),
+        MODEL_TENSOR.EAGLE3_FC: (
+            "fc",                                      # eagle3
+            "eagle_linear",                            # eagle3 mistral
+        ),
+        MODEL_TENSOR.EAGLE3_D2T: (
+            "d2t",                                     # eagle3
+        ),
     }
 
     block_mappings_cfg: dict[MODEL_TENSOR, tuple[str, ...]] = {
@@ -1046,6 +1053,7 @@ class TensorNameMap:
 
         MODEL_TENSOR.ATTN_KV_B: (
             "model.layers.{bid}.self_attn.kv_b_proj", # deepseek2
+            "layers.{bid}.attention.wkv_b",           # mistral-large
         ),
 
         MODEL_TENSOR.ATTN_K_B: (

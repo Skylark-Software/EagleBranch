@@ -204,6 +204,7 @@ struct llama_hparams {
     // EAGLE3 draft model - layer indices to extract from target model
     // e.g., for 32-layer target: [2, 16, 29] (low, middle, high)
     std::array<int, 3> eagle3_extract_layers = {0, 0, 0};
+    int eagle3_n_extract = 3;  // number of extraction layers (2 for Mistral, 3 for LLaMA)
 
     // EAGLE3 draft model - target model hidden size
     uint32_t eagle3_target_hidden_size = 0;
