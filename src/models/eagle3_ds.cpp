@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-impl.h"
 
 // EAGLE3_DS Encoder: processes target model features through feature fusion layer
 // Same concept as eagle3 encoder but supports variable number of extraction layers (2 or 3)
@@ -58,6 +59,8 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
     // When loaded standalone (e.g. during params_fit/sched_reserve/warmup), target tensors are not yet available.
     // Build a minimal placeholder graph with proper output dimensions so graph reservation and decode can proceed.
     if (token_embd_eagle3 == nullptr || model.output == nullptr) {
+        LLAMA_LOG_WARN("%s: EAGLE3_DS PLACEHOLDER graph (tok_embd=%p, output=%p, target_tok_embd=%p)\n",
+                __func__, (void*)model.tok_embd, (void*)model.output, (void*)model.target_tok_embd);
         const int64_t n_vocab = model.vocab.n_tokens();
 
         ggml_tensor * dummy_embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
@@ -75,6 +78,9 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
         ggml_build_forward_expand(gf, dummy_logits);
         return;
     }
+
+    LLAMA_LOG_INFO("%s: EAGLE3_DS REAL decoder graph (n_tokens=%d, tok_embd=%p, output=%p)\n",
+            __func__, (int)n_tokens, (void*)token_embd_eagle3, (void*)model.output);
 
     ggml_tensor * inp_embd = build_inp_embd(token_embd_eagle3);
     cb(inp_embd, "inp_embd", -1);
@@ -117,11 +123,13 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
 
         ggml_tensor * inpSA = inpL;
 
-        // Concatenate normalized inp_embd and normalized inp_g -> [2*n_embd, n_tokens]
-        cur = ggml_concat(ctx0, embd_norm, g_norm, 0);
-        cb(cur, "concat_embd", il);
+        // Fuse token embeddings and g_embeddings via element-wise addition -> [n_embd, n_tokens]
+        // Note: Unlike standard eagle3 which concatenates to [2*n_embd] with specially-sized weights,
+        // the DS variant uses standard DeepSeek V2 MLA weights sized for [n_embd] input.
+        cur = ggml_add(ctx0, embd_norm, g_norm);
+        cb(cur, "fused_embd", il);
 
-        // MLA self-attention on concatenated input
+        // MLA self-attention on fused input
         {
             ggml_tensor * q = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
             cb(q, "q", il);

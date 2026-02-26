@@ -88,6 +88,9 @@ struct llama_eagle3 {
     // Tensor references for feature extraction from target model
     std::vector<ggml_tensor *> extract_tensors;
 
+    // Running token offset for accumulating features across ubatches
+    int64_t features_token_offset = 0;
+
     // Clear all stored data
     void clear() {
         target_features.clear();

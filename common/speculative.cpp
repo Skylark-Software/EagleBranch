@@ -982,6 +982,9 @@ common_speculative * common_speculative_init(
             llama_context_params params_enc = params.cparams_dft;
             params_enc.target_model = nullptr;
             params_enc.embeddings = true;
+            // Encoder processes all tokens in a single shot (no micro-batching),
+            // so n_ubatch must be >= n_batch
+            params_enc.n_ubatch = params_enc.n_batch;
             ctx_dft_enc = llama_init_from_model(params.model_dft, params_enc);
             if (!ctx_dft_enc) {
                 LOG_ERR("failed to create EAGLE3 encoder context\n");

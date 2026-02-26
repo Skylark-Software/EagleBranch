@@ -1080,19 +1080,26 @@ void llama_context::set_eagle3(const llama_model * model) {
 
     const auto & eagle3_hparams = model->hparams;
 
-    // Copy feature extraction layer indices from EAGLE3 model's hparams
+    // Copy only the configured number of extraction layer indices (2 or 3)
+    const int n_extract = eagle3_hparams.eagle3_n_extract;
     eagle3.extract_layer_indices.assign(
             eagle3_hparams.eagle3_extract_layers.begin(),
-            eagle3_hparams.eagle3_extract_layers.end()
+            eagle3_hparams.eagle3_extract_layers.begin() + n_extract
             );
 
-    // Allocate tensors array for extraction
-    eagle3.extract_tensors.resize(eagle3.extract_layer_indices.size(), nullptr);
+    // Allocate tensors array for extraction (must match n_extract)
+    eagle3.extract_tensors.resize(n_extract, nullptr);
 
-    LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d, %d]\n", __func__,
-            eagle3.extract_layer_indices[0],
-            eagle3.extract_layer_indices[1],
-            eagle3.extract_layer_indices[2]);
+    if (n_extract == 2) {
+        LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d]\n", __func__,
+                eagle3.extract_layer_indices[0],
+                eagle3.extract_layer_indices[1]);
+    } else {
+        LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d, %d]\n", __func__,
+                eagle3.extract_layer_indices[0],
+                eagle3.extract_layer_indices[1],
+                eagle3.extract_layer_indices[2]);
+    }
 }
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
@@ -1605,6 +1612,14 @@ int llama_context::decode(const llama_batch & batch_inp) {
     };
 
     int64_t n_outputs_prev = 0;
+
+    // EAGLE3: pre-allocate feature buffer for all tokens and reset accumulation offset
+    if (cparams.eagle3_extract_enabled && !eagle3.extract_tensors.empty()) {
+        const int64_t n_embd = model.hparams.n_embd;
+        const size_t n_layers = eagle3.extract_tensors.size();
+        eagle3.target_features.resize(n_embd * n_layers * n_tokens_all);
+        eagle3.features_token_offset = 0;
+    }
 
     do {
         const auto & ubatch = mctx->get_ubatch();
@@ -2226,16 +2241,19 @@ void llama_context::extract_eagle3_features(const llama_ubatch & ubatch) {
     const int64_t n_embd = model.hparams.n_embd;
     const size_t n_layers = eagle3.extract_tensors.size();
 
-    // Allocate storage for concatenated features
     const int64_t n_embd_concat = n_embd * n_layers;
-    eagle3.target_features.resize(n_embd_concat * n_tokens);
+    const int64_t tok_offset = eagle3.features_token_offset;
+
+    // Buffer should already be pre-allocated in decode() for the full batch
+    GGML_ASSERT((tok_offset + n_tokens) * n_embd_concat <= (int64_t)eagle3.target_features.size() &&
+                "EAGLE3 feature buffer too small - was it pre-allocated in decode()?");
 
     // Temporary buffer to hold layer features before transposing
     static thread_local std::vector<float> temp_layer_features;
     temp_layer_features.resize(n_embd * n_tokens);
 
-    LLAMA_LOG_DEBUG("%s: Start to extract EAGLE3 features: %zu layers, %lld tokens, %lld embd\n",
-                    __func__, n_layers, (long long)n_tokens, (long long)n_embd);
+    LLAMA_LOG_DEBUG("%s: extracting EAGLE3 features: %zu layers, %lld tokens (offset %lld), %lld embd\n",
+                    __func__, n_layers, (long long)n_tokens, (long long)tok_offset, (long long)n_embd);
 
     // Extract each layer's features and interleave into token-major layout
     for (size_t layer_idx = 0; layer_idx < n_layers; ++layer_idx) {
@@ -2255,18 +2273,17 @@ void llama_context::extract_eagle3_features(const llama_ubatch & ubatch) {
         ggml_backend_tensor_get_async(backend, tensor, temp_layer_features.data(), 0, size_bytes);
         ggml_backend_sched_synchronize(sched.get());
 
-        // Then copy to correct position in target_features
+        // Copy to correct position in target_features, accounting for token offset
         // target_features layout: [token_0_all_layers, token_1_all_layers, ...]
         // Each token has [layer_0_embd, layer_1_embd, layer_2_embd]
         for (int64_t token_idx = 0; token_idx < n_tokens; ++token_idx) {
-            // Source: temp_layer_features[token_idx * n_embd ... (token_idx + 1) * n_embd - 1]
             const float * src = temp_layer_features.data() + token_idx * n_embd;
-            // Dest: target_features[token_idx * n_embd_concat + layer_idx * n_embd]
-            float * dest = eagle3.target_features.data() + token_idx * n_embd_concat + layer_idx * n_embd;
+            float * dest = eagle3.target_features.data() + (tok_offset + token_idx) * n_embd_concat + layer_idx * n_embd;
             std::memcpy(dest, src, n_embd * sizeof(float));
         }
     }
 
+    eagle3.features_token_offset += n_tokens;
 }
 
 //
