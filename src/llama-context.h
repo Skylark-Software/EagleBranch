@@ -241,6 +241,9 @@ public:
     // EAGLE3: Set g_embeddings from encoder output for decoder input
     void set_eagle3_g_embeddings(const float * g_embd, int32_t n_embd, int32_t n_tokens);
 
+    // EAGLE v1/v2: Get pointer to result_norm features (post-norm final hidden state)
+    const float * get_eagle_result_norm() const;
+
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
 private:
@@ -254,6 +257,9 @@ private:
 
     // EAGLE3: Extract intermediate layer features from target model
     void extract_eagle3_features(const llama_ubatch & ubatch);
+
+    // EAGLE v1/v2: Extract result_norm (post-norm final hidden state) from target model
+    void extract_eagle_result_norm(const llama_ubatch & ubatch);
 
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);

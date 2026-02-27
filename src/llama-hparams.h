@@ -212,6 +212,9 @@ struct llama_hparams {
     // EAGLE3 draft model - apply hidden_norm before storing residual
     bool eagle3_norm_before_residual = false;
 
+    // EAGLE method: false = Eagle-3 (multi-layer features), true = EAGLE v1/v2 (last hidden + embedding)
+    bool eagle_is_v1 = false;
+
     // needed by encoder-decoder models (e.g. T5, FLAN-T5)
     // ref: https://github.com/ggml-org/llama.cpp/pull/8141
     llama_token dec_start_token_id = LLAMA_TOKEN_NULL;

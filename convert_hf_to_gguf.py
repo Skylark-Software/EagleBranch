@@ -11497,7 +11497,23 @@ class MistralMoeModel(DeepseekV2Model):
                     break
             logger.info(f"EAGLE3_DS: n_extract_layers = {n_extract}")
 
-            if n_extract == 2:
+            # Determine EAGLE method: n_extract=2 with FC=[n_embd, 2*n_embd] could be:
+            # - EAGLE v1/v2: FC(concat(embedding, last_hidden)) — trained with "method": "eagle"
+            # - Eagle-3: FC(concat(layer_i, layer_j)) — trained with "method": "eagle3"
+            # Check README.md for the method hint
+            eagle_method = "eagle3"  # default
+            readme_path = self.dir_model / "README.md"
+            if readme_path.exists():
+                readme_text = readme_path.read_text()
+                if '"method": "eagle"' in readme_text or "'method': 'eagle'" in readme_text:
+                    eagle_method = "eagle"
+                    logger.info("EAGLE3_DS: Detected EAGLE v1/v2 method from README.md")
+
+            if eagle_method == "eagle":
+                # EAGLE v1/v2: no intermediate layer extraction, uses result_norm + embeddings
+                extract_layers = [target_num_layers - 1]  # placeholder, not actually used at runtime
+                logger.info(f"EAGLE3_DS: EAGLE v1/v2 mode - extract_layers = {extract_layers} (placeholder)")
+            elif n_extract == 2:
                 extract_layers = [2, target_num_layers - 3]
             else:
                 extract_layers = [2, target_num_layers // 2, target_num_layers - 3]
@@ -11505,6 +11521,7 @@ class MistralMoeModel(DeepseekV2Model):
             logger.info(f"EAGLE3_DS: extract_layers = {extract_layers} (target model has {target_num_layers} layers)")
             self.gguf_writer.add_array(f"{self.gguf_writer.arch}.extract_layers", extract_layers)
             self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.target_hidden_size", hidden_size)
+            self.gguf_writer.add_string(f"{self.gguf_writer.arch}.eagle_method", eagle_method)
 
     _eagle3_scales: dict[str, Tensor] | None = None
 

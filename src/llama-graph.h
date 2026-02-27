@@ -91,11 +91,20 @@ struct llama_eagle3 {
     // Running token offset for accumulating features across ubatches
     int64_t features_token_offset = 0;
 
+    // EAGLE v1/v2: result_norm tensor reference (post-norm final hidden state from target)
+    ggml_tensor * result_norm_tensor = nullptr;
+
+    // EAGLE v1/v2: result_norm features copied from target model
+    // Shape: [n_embd, n_tokens_all]
+    std::vector<float> result_norm_features;
+
     // Clear all stored data
     void clear() {
         target_features.clear();
         g_embeddings.clear();
         extract_tensors.clear();
+        result_norm_features.clear();
+        result_norm_tensor = nullptr;
     }
 };
 

@@ -544,6 +544,7 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_embd_inp (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_embd_out (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
+    LLAMA_API bool    llama_model_eagle_is_v1(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
@@ -905,6 +906,11 @@ extern "C" {
                    const float * g_embd,
                        int32_t   n_embd,
                        int32_t   n_tokens);
+
+    // EAGLE v1/v2: Get pointer to result_norm features (post-norm final hidden state)
+    // Returns NULL if no features are available
+    // Format: [n_embd, n_tokens]
+    LLAMA_API const float * llama_get_eagle_result_norm(struct llama_context * ctx);
 
     //
     // Decoding

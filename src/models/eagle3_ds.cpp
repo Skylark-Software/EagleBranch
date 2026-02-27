@@ -85,12 +85,28 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
     ggml_tensor * inp_embd = build_inp_embd(token_embd_eagle3);
     cb(inp_embd, "inp_embd", -1);
 
-    // g_embeddings input from encoder
+    // g_embeddings input: encoder output (Eagle-3) or result_norm (EAGLE v1/v2)
     ggml_tensor * inp_g = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
     ggml_set_input(inp_g);
     cb(inp_g, "inp_g_embeddings", -1);
 
-    inpL = inp_g;
+    const bool eagle_v1 = hparams.eagle_is_v1;
+
+    if (eagle_v1) {
+        // EAGLE v1/v2: FC(concat(embedding, hidden_state)) -> decoder input
+        // inp_embd = token embeddings [n_embd, n_tokens]
+        // inp_g    = final hidden state from target model [n_embd, n_tokens]
+        ggml_tensor * concat_input = ggml_concat(ctx0, inp_embd, inp_g, 0);  // [2*n_embd, n_tokens]
+        cb(concat_input, "eagle_concat", -1);
+
+        cur = build_lora_mm(model.fc, concat_input);  // FC: [2*n_embd] -> [n_embd]
+        cb(cur, "eagle_fc_out", -1);
+
+        inpL = cur;  // residual from FC output
+    } else {
+        // Eagle-3: add(norm(embedding), norm(g_embeddings))
+        inpL = inp_g;
+    }
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
@@ -102,32 +118,38 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
     // Single decoder layer (il = 0)
     const int il = 0;
     {
-        // Apply input_layernorm to the token embeddings
-        ggml_tensor * embd_norm = build_norm(inp_embd,
-                model.layers[il].attn_norm, NULL,
-                LLM_NORM_RMS, il);
-        cb(embd_norm, "embd_norm", il);
-
-        // Apply hidden_norm to inp_g (if available)
-        ggml_tensor * g_norm;
-        if (model.layers[il].eagle3_hidden_norm) {
-            g_norm = build_norm(inp_g,
-                    model.layers[il].eagle3_hidden_norm, NULL,
-                    LLM_NORM_RMS, -1);
-        } else {
-            g_norm = build_norm(inp_g,
+        if (eagle_v1) {
+            // EAGLE v1/v2: apply attn_norm to the FC output (standard transformer pre-norm)
+            cur = build_norm(inpL,
                     model.layers[il].attn_norm, NULL,
-                    LLM_NORM_RMS, -1);
+                    LLM_NORM_RMS, il);
+            cb(cur, "fused_embd", il);
+        } else {
+            // Eagle-3: apply input_layernorm to the token embeddings
+            ggml_tensor * embd_norm = build_norm(inp_embd,
+                    model.layers[il].attn_norm, NULL,
+                    LLM_NORM_RMS, il);
+            cb(embd_norm, "embd_norm", il);
+
+            // Apply hidden_norm to inp_g (if available)
+            ggml_tensor * g_norm;
+            if (model.layers[il].eagle3_hidden_norm) {
+                g_norm = build_norm(inp_g,
+                        model.layers[il].eagle3_hidden_norm, NULL,
+                        LLM_NORM_RMS, -1);
+            } else {
+                g_norm = build_norm(inp_g,
+                        model.layers[il].attn_norm, NULL,
+                        LLM_NORM_RMS, -1);
+            }
+            cb(g_norm, "g_norm", il);
+
+            // Fuse token embeddings and g_embeddings via element-wise addition -> [n_embd, n_tokens]
+            cur = ggml_add(ctx0, embd_norm, g_norm);
+            cb(cur, "fused_embd", il);
         }
-        cb(g_norm, "g_norm", il);
 
         ggml_tensor * inpSA = inpL;
-
-        // Fuse token embeddings and g_embeddings via element-wise addition -> [n_embd, n_tokens]
-        // Note: Unlike standard eagle3 which concatenates to [2*n_embd] with specially-sized weights,
-        // the DS variant uses standard DeepSeek V2 MLA weights sized for [n_embd] input.
-        cur = ggml_add(ctx0, embd_norm, g_norm);
-        cb(cur, "fused_embd", il);
 
         // MLA self-attention on fused input
         {
@@ -289,14 +311,26 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
 
     cur = inpL;
 
-    // Output prenorm state (for next token's g_embeddings)
-    ggml_set_output(cur);
-    res->t_embd = cur;
+    if (eagle_v1) {
+        // EAGLE v1/v2: output post-norm state for autoregressive g_embeddings
+        // Must match target model's result_norm (post-norm) for consistent FC input
+        cur = build_norm(cur,
+                model.output_norm, NULL,
+                LLM_NORM_RMS, -1);
+        cb(cur, "result_norm", -1);
 
-    cur = build_norm(cur,
-            model.output_norm, NULL,
-            LLM_NORM_RMS, -1);
-    cb(cur, "result_norm", -1);
+        ggml_set_output(cur);
+        res->t_embd = cur;
+    } else {
+        // Eagle-3: output prenorm state (for next token's g_embeddings)
+        ggml_set_output(cur);
+        res->t_embd = cur;
+
+        cur = build_norm(cur,
+                model.output_norm, NULL,
+                LLM_NORM_RMS, -1);
+        cb(cur, "result_norm", -1);
+    }
 
     // lm_head
     cur = build_lora_mm(model.output, cur);

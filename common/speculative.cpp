@@ -505,8 +505,10 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
         auto & ctx_dft_dec = spec->ctx_dft_dec;
         auto & smpl        = spec->smpl;
 
-        //result = gen_eagle3_draft(spec, params, prompt_tgt, id_last);
-        const int n_embd = llama_model_n_embd(llama_get_model(ctx_dft_enc));
+        const auto * model_dft = llama_get_model(ctx_dft_dec);
+        const bool eagle_v1 = llama_model_eagle_is_v1(model_dft);
+
+        const int n_embd = llama_model_n_embd(model_dft);
         const int n      = (int)prompt_tgt.size();
         const int n_new  = n - spec->eagle3_n_past;
 
@@ -516,27 +518,36 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
         // Clear draft positions from decoder KV cache [n_past, inf)
         llama_memory_seq_rm(llama_get_memory(ctx_dft_dec), 0, spec->eagle3_n_past, -1);
 
-        // Encoder: features → g_embeddings
-        const float * features = llama_get_eagle3_target_features(ctx_tgt);
-        GGML_ASSERT(features && "no target features");
+        if (eagle_v1) {
+            // EAGLE v1/v2: pass result_norm (final hidden state) as g_embeddings to decoder
+            // The decoder will do FC(concat(embedding, g_embeddings)) internally
+            const float * result_norm = llama_get_eagle_result_norm(ctx_tgt);
+            GGML_ASSERT(result_norm && "no result_norm features");
 
-        llama_batch enc_batch = {
-            /*.n_tokens  =*/ n_new,
-            /*.token     =*/ nullptr,
-            /*.embd      =*/ const_cast<float*>(features),
-            /*.pos       =*/ nullptr,
-            /*.n_seq_id  =*/ nullptr,
-            /*.seq_id    =*/ nullptr,
-            /*.logits    =*/ nullptr,
-        };
-        GGML_ASSERT(llama_encode(ctx_dft_enc, enc_batch) == 0);
+            llama_set_eagle3_g_embeddings(ctx_dft_dec, result_norm, n_embd, n_new);
+        } else {
+            // Eagle-3: Encoder features → g_embeddings
+            const float * features = llama_get_eagle3_target_features(ctx_tgt);
+            GGML_ASSERT(features && "no target features");
 
-        const float * g_embd = llama_get_embeddings(ctx_dft_enc);
-        GGML_ASSERT(g_embd && "encoder output failed");
+            llama_batch enc_batch = {
+                /*.n_tokens  =*/ n_new,
+                /*.token     =*/ nullptr,
+                /*.embd      =*/ const_cast<float*>(features),
+                /*.pos       =*/ nullptr,
+                /*.n_seq_id  =*/ nullptr,
+                /*.seq_id    =*/ nullptr,
+                /*.logits    =*/ nullptr,
+            };
+            GGML_ASSERT(llama_encode(ctx_dft_enc, enc_batch) == 0);
+
+            const float * g_embd = llama_get_embeddings(ctx_dft_enc);
+            GGML_ASSERT(g_embd && "encoder output failed");
+
+            llama_set_eagle3_g_embeddings(ctx_dft_dec, g_embd, n_embd, n_new);
+        }
 
         // Decoder batch: process new tokens with KV cache reuse
-        llama_set_eagle3_g_embeddings(ctx_dft_dec, g_embd, n_embd, n_new);
-
         common_batch_clear(batch);
         for (int i = 0; i < n_new; i++) {
             const int pos = spec->eagle3_n_past + i;
@@ -979,16 +990,22 @@ common_speculative * common_speculative_init(
 
     if (params.model_dft) {
         if (params.eagle3) {
-            llama_context_params params_enc = params.cparams_dft;
-            params_enc.target_model = nullptr;
-            params_enc.embeddings = true;
-            // Encoder processes all tokens in a single shot (no micro-batching),
-            // so n_ubatch must be >= n_batch
-            params_enc.n_ubatch = params_enc.n_batch;
-            ctx_dft_enc = llama_init_from_model(params.model_dft, params_enc);
-            if (!ctx_dft_enc) {
-                LOG_ERR("failed to create EAGLE3 encoder context\n");
-                return nullptr;
+            const bool eagle_v1 = llama_model_eagle_is_v1(params.model_dft);
+
+            // EAGLE v1/v2: no encoder needed (result_norm passed directly as g_embeddings)
+            // Eagle-3: encoder processes multi-layer features through FC
+            if (!eagle_v1) {
+                llama_context_params params_enc = params.cparams_dft;
+                params_enc.target_model = nullptr;
+                params_enc.embeddings = true;
+                // Encoder processes all tokens in a single shot (no micro-batching),
+                // so n_ubatch must be >= n_batch
+                params_enc.n_ubatch = params_enc.n_batch;
+                ctx_dft_enc = llama_init_from_model(params.model_dft, params_enc);
+                if (!ctx_dft_enc) {
+                    LOG_ERR("failed to create EAGLE3 encoder context\n");
+                    return nullptr;
+                }
             }
 
             llama_context_params params_dec = params.cparams_dft;

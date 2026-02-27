@@ -2500,19 +2500,24 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_SCALE,  hparams.f_attn_temp_scale, false);
                 ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_LENGTH, hparams.n_attn_temp_floor_scale, false);
 
-                // EAGLE3_DS layer extraction configuration (supports 2 or 3 extract layers)
+                // EAGLE3_DS layer extraction configuration (supports 1, 2, or 3 extract layers)
                 std::array<int, 4> extract_layers_tmp = {};
                 int n_extract = 0;
                 if (ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 3, false)) {
                     n_extract = 3;
                 } else if (ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 2, false)) {
                     n_extract = 2;
+                } else if (ml.get_key_or_arr(LLM_KV_EAGLE3_EXTRACT_LAYERS, extract_layers_tmp, 1, false)) {
+                    n_extract = 1;
                 } else {
                     throw std::runtime_error("EAGLE3_DS model requires 'extract_layers' in GGUF metadata");
                 }
                 std::copy_n(extract_layers_tmp.begin(), std::min(n_extract, 3), hparams.eagle3_extract_layers.begin());
                 hparams.eagle3_n_extract = n_extract;
-                if (n_extract == 2) {
+                if (n_extract == 1) {
+                    LLAMA_LOG_INFO("%s: EAGLE3_DS extract_layers = [%d]\n", __func__,
+                                   hparams.eagle3_extract_layers[0]);
+                } else if (n_extract == 2) {
                     LLAMA_LOG_INFO("%s: EAGLE3_DS extract_layers = [%d, %d]\n", __func__,
                                    hparams.eagle3_extract_layers[0],
                                    hparams.eagle3_extract_layers[1]);
@@ -2526,6 +2531,16 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE, hparams.eagle3_target_hidden_size);
                 LLAMA_LOG_INFO("%s: EAGLE3_DS target_hidden_size = %u (draft n_embd = %u)\n", __func__,
                                hparams.eagle3_target_hidden_size, hparams.n_embd);
+
+                // Check eagle_method: "eagle" = EAGLE v1/v2, "eagle3" = Eagle-3
+                {
+                    std::string eagle_method;
+                    if (ml.get_key(LLM_KV_EAGLE3_METHOD, eagle_method, false)) {
+                        hparams.eagle_is_v1 = (eagle_method == "eagle");
+                        LLAMA_LOG_INFO("%s: EAGLE3_DS eagle_method = %s (is_v1 = %s)\n", __func__,
+                                       eagle_method.c_str(), hparams.eagle_is_v1 ? "true" : "false");
+                    }
+                }
 
                 type = LLM_TYPE_UNKNOWN;
             } break;
@@ -7256,7 +7271,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             case LLM_ARCH_EAGLE3_DS:
                 {
                     const int64_t n_extract = hparams.eagle3_n_extract;
-                    const int64_t n_embd_target_features = n_extract * hparams.eagle3_target_hidden_size;
+                    // EAGLE v1/v2: FC input = concat(embedding, hidden) = 2 * n_embd
+                    // Eagle-3:     FC input = concat(layer_features) = n_extract * target_hidden_size
+                    const int64_t n_embd_target_features = hparams.eagle_is_v1
+                        ? 2 * (int64_t)hparams.eagle3_target_hidden_size
+                        : n_extract * (int64_t)hparams.eagle3_target_hidden_size;
                     const bool is_mla = hparams.is_mla();
 
                     // MLA dimensions (same as DeepSeek V2)
@@ -9111,6 +9130,10 @@ int32_t llama_model_n_embd_out(const llama_model * model) {
 
 int32_t llama_model_n_layer(const llama_model * model) {
     return model->hparams.n_layer;
+}
+
+bool llama_model_eagle_is_v1(const llama_model * model) {
+    return model->hparams.eagle_is_v1;
 }
 
 int32_t llama_model_n_head(const llama_model * model) {

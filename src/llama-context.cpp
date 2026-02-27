@@ -1080,25 +1080,32 @@ void llama_context::set_eagle3(const llama_model * model) {
 
     const auto & eagle3_hparams = model->hparams;
 
-    // Copy only the configured number of extraction layer indices (2 or 3)
-    const int n_extract = eagle3_hparams.eagle3_n_extract;
-    eagle3.extract_layer_indices.assign(
-            eagle3_hparams.eagle3_extract_layers.begin(),
-            eagle3_hparams.eagle3_extract_layers.begin() + n_extract
-            );
-
-    // Allocate tensors array for extraction (must match n_extract)
-    eagle3.extract_tensors.resize(n_extract, nullptr);
-
-    if (n_extract == 2) {
-        LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d]\n", __func__,
-                eagle3.extract_layer_indices[0],
-                eagle3.extract_layer_indices[1]);
+    if (eagle3_hparams.eagle_is_v1) {
+        // EAGLE v1/v2: only need result_norm (post-norm final hidden state), no intermediate layer extraction
+        eagle3.extract_layer_indices.clear();
+        eagle3.extract_tensors.clear();
+        LLAMA_LOG_INFO("%s: EAGLE v1/v2 mode - will capture result_norm from target model\n", __func__);
     } else {
-        LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d, %d]\n", __func__,
-                eagle3.extract_layer_indices[0],
-                eagle3.extract_layer_indices[1],
-                eagle3.extract_layer_indices[2]);
+        // Eagle-3: extract from intermediate layers
+        const int n_extract = eagle3_hparams.eagle3_n_extract;
+        eagle3.extract_layer_indices.assign(
+                eagle3_hparams.eagle3_extract_layers.begin(),
+                eagle3_hparams.eagle3_extract_layers.begin() + n_extract
+                );
+
+        // Allocate tensors array for extraction (must match n_extract)
+        eagle3.extract_tensors.resize(n_extract, nullptr);
+
+        if (n_extract == 2) {
+            LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d]\n", __func__,
+                    eagle3.extract_layer_indices[0],
+                    eagle3.extract_layer_indices[1]);
+        } else {
+            LLAMA_LOG_INFO("%s: EAGLE3 extraction enabled for layers [%d, %d, %d]\n", __func__,
+                    eagle3.extract_layer_indices[0],
+                    eagle3.extract_layer_indices[1],
+                    eagle3.extract_layer_indices[2]);
+        }
     }
 }
 
@@ -1174,6 +1181,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         extract_eagle3_features(ubatch);
     }
 
+    // EAGLE v1/v2: Extract result_norm (post-norm final hidden state) after graph execution
+    if (cparams.eagle3_extract_enabled && eagle3.result_norm_tensor != nullptr) {
+        extract_eagle_result_norm(ubatch);
+    }
+
     ret = GGML_STATUS_SUCCESS;
 
     return res;
@@ -1190,7 +1202,15 @@ int llama_context::encode(const llama_batch & batch_inp) {
     const auto & hparams = model.hparams;
 
     // EAGLE3: use n_extract*target_hidden_size for concatenated features input
-    const int64_t n_embd  = ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && batch_inp.embd) ? hparams.eagle3_n_extract * hparams.eagle3_target_hidden_size : hparams.n_embd;
+    // EAGLE v1/v2: encoder not used, but if called use 2*target_hidden_size
+    int64_t n_embd;
+    if ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && batch_inp.embd) {
+        n_embd = hparams.eagle_is_v1
+            ? 2 * (int64_t)hparams.eagle3_target_hidden_size
+            : hparams.eagle3_n_extract * (int64_t)hparams.eagle3_target_hidden_size;
+    } else {
+        n_embd = hparams.n_embd;
+    }
     const int64_t n_vocab = model.vocab.n_tokens();
 
     // note: during encode, we always pass the full sequence starting from pos = 0
@@ -1494,7 +1514,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const int64_t n_embd  = hparams.n_embd_inp();
 
     // when computing embeddings, all tokens are output
-    const bool output_all   = cparams.embeddings;
+    // EAGLE v1/v2: need result_norm for ALL tokens (disables inp_out_ids pruning)
+    const bool eagle_v1_extract = cparams.eagle3_extract_enabled && eagle3.extract_tensors.empty();
+    const bool output_all   = cparams.embeddings || eagle_v1_extract;
     const bool has_samplers = !sampling.samplers.empty();
 
     const uint32_t n_seq_max = cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max;
@@ -1619,6 +1641,14 @@ int llama_context::decode(const llama_batch & batch_inp) {
         const size_t n_layers = eagle3.extract_tensors.size();
         eagle3.target_features.resize(n_embd * n_layers * n_tokens_all);
         eagle3.features_token_offset = 0;
+    }
+
+    // EAGLE v1/v2: pre-allocate result_norm buffer
+    if (cparams.eagle3_extract_enabled && eagle3.extract_tensors.empty()) {
+        const int64_t n_embd = model.hparams.n_embd;
+        eagle3.result_norm_features.resize(n_embd * n_tokens_all);
+        eagle3.features_token_offset = 0;
+        eagle3.result_norm_tensor = nullptr;
     }
 
     do {
@@ -2199,6 +2229,7 @@ llm_graph_cb llama_context::graph_get_cb() const {
 
         // EAGLE3: Extract intermediate layer features if this is an extraction point
         if (cparams.eagle3_extract_enabled) {
+            // Eagle-3: capture intermediate layer features
             static constexpr const char * prefix = "eagle3_extract_";
             static constexpr size_t prefix_len = 15; // strlen("eagle3_extract_")
 
@@ -2215,6 +2246,13 @@ llm_graph_cb llama_context::graph_get_cb() const {
                                    __func__, extract_idx, il,
                                    eagle3.extract_layer_indices[extract_idx], name);
                 }
+            }
+
+            // EAGLE v1/v2: capture result_norm (post-norm final hidden state)
+            if (il == -1 && strcmp(name, "result_norm") == 0) {
+                ggml_set_output(cur);
+                eagle3.result_norm_tensor = cur;
+                LLAMA_LOG_DEBUG("%s: EAGLE stored result_norm tensor reference\n", __func__);
             }
         }
 
@@ -2284,6 +2322,34 @@ void llama_context::extract_eagle3_features(const llama_ubatch & ubatch) {
     }
 
     eagle3.features_token_offset += n_tokens;
+}
+
+void llama_context::extract_eagle_result_norm(const llama_ubatch & ubatch) {
+    const int64_t n_tokens = ubatch.n_tokens;
+    const int64_t n_embd = model.hparams.n_embd;
+    const int64_t tok_offset = eagle3.features_token_offset;
+
+    GGML_ASSERT((tok_offset + n_tokens) * n_embd <= (int64_t)eagle3.result_norm_features.size() &&
+                "EAGLE result_norm buffer too small");
+
+    ggml_tensor * tensor = eagle3.result_norm_tensor;
+    GGML_ASSERT(tensor != nullptr && "EAGLE result_norm tensor is null");
+
+    ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), tensor);
+    GGML_ASSERT(backend != nullptr && "EAGLE result_norm tensor has no backend");
+
+    GGML_ASSERT(tensor->ne[0] == n_embd && tensor->ne[1] == n_tokens &&
+                "EAGLE result_norm tensor has unexpected shape");
+
+    const size_t size_bytes = n_embd * n_tokens * sizeof(float);
+    float * dest = eagle3.result_norm_features.data() + tok_offset * n_embd;
+    ggml_backend_tensor_get_async(backend, tensor, dest, 0, size_bytes);
+    ggml_backend_sched_synchronize(sched.get());
+
+    eagle3.features_token_offset += n_tokens;
+
+    LLAMA_LOG_DEBUG("%s: extracted EAGLE result_norm: %lld tokens (offset %lld)\n",
+                    __func__, (long long)n_tokens, (long long)tok_offset);
 }
 
 //
@@ -3731,6 +3797,11 @@ void llama_context::set_eagle3_g_embeddings(const float * g_embd, int32_t n_embd
     std::memcpy(eagle3.g_embeddings.data(), g_embd, size * sizeof(float));
 }
 
+const float * llama_context::get_eagle_result_norm() const {
+    GGML_ASSERT(!eagle3.result_norm_features.empty() && "EAGLE result_norm not extracted");
+    return eagle3.result_norm_features.data();
+}
+
 //
 // C API wrappers
 //
@@ -3741,4 +3812,8 @@ const float * llama_get_eagle3_target_features(llama_context * ctx) {
 
 void llama_set_eagle3_g_embeddings(llama_context * ctx, const float * g_embd, int32_t n_embd, int32_t n_tokens) {
     ctx->set_eagle3_g_embeddings(g_embd, n_embd, n_tokens);
+}
+
+const float * llama_get_eagle_result_norm(llama_context * ctx) {
+    return ctx->get_eagle_result_norm();
 }
