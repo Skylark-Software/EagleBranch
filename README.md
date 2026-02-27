@@ -1,8 +1,73 @@
-# llama.cpp
+# EAGLE Speculative Decoding for Mistral Large 3 (llama.cpp fork)
 
-![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
+This is a fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) that adds **EAGLE v1/v2 speculative decoding** support for [Mistral Large 3 675B](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512) using the [Mistral Eagle draft head](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+## What this fork adds
+
+The `eagle3` branch introduces a new **`eagle3_ds`** architecture (EAGLE3-DeepSeekV2) that supports both EAGLE v1/v2 and Eagle-3 style speculative decoding for models using the DeepSeek V2 architecture (MLA attention + MoE), including Mistral Large 3.
+
+### Key changes (13 files, 3 commits)
+
+1. **EAGLE3_DS architecture** — Full decoder implementation with MLA (Multi-head Latent Attention) and MoE (Mixture of Experts) support, matching the target model's DeepSeek V2 architecture
+2. **EAGLE v1/v2 mode** — The Mistral Eagle head uses EAGLE v1 (`FC(concat(embedding, final_hidden_state))`), not Eagle-3 multi-layer feature extraction. The fork auto-detects the method from GGUF metadata (`eagle_method = "eagle"`)
+3. **result_norm extraction** — Captures post-norm final hidden states from the target model for EAGLE v1 autoregressive drafting
+4. **GGUF conversion** — `convert_hf_to_gguf.py` handles Mistral Eagle → eagle3_ds conversion with automatic method detection
+
+### Files modified
+
+| File | Description |
+|------|-------------|
+| `src/models/eagle3_ds.cpp` | EAGLE3-DS decoder graph (MLA + MoE + EAGLE v1/v3 dual mode) |
+| `common/speculative.cpp` | EAGLE v1 draft loop, skip encoder for v1, g_embeddings wiring |
+| `src/llama-context.cpp` | result_norm capture, extraction, output_all for v1 |
+| `src/llama-model.cpp` | GGUF loading, eagle_is_v1 flag, FC tensor sizing |
+| `convert_hf_to_gguf.py` | Mistral Eagle conversion with method detection |
+| `src/llama-arch.{h,cpp}` | LLM_KV_EAGLE3_METHOD key |
+| `src/llama-hparams.h` | `eagle_is_v1` flag |
+| `src/llama-graph.h` | result_norm fields in eagle3 state |
+| `src/llama-context.h` | API declarations |
+| `include/llama.h` | C API for result_norm access |
+| `gguf-py/gguf/constants.py` | EAGLE3_METHOD constant |
+| `common/arg.cpp` | --no-warmup for speculative example |
+
+## Results
+
+Tested with Mistral Large 3 675B Q4_K_M (383 GB) on 4x Tesla P40 + 503 GB RAM:
+
+| Metric | Value |
+|--------|-------|
+| Acceptance rate | **64.5%** (71/110 drafted tokens) |
+| Generation speed | 2.86 tok/s (with speculation) |
+| Baseline (no speculation) | 4.72 tok/s |
+| Draft decoder speed | 141 tok/s on GPU |
+
+The 64.5% acceptance rate confirms the EAGLE v1 implementation is correct. However, speculative decoding does not provide a net throughput improvement for this hardware configuration — the target model's verification cost (1085 graph splits across 4 GPUs + CPU for the massive MoE architecture) dominates, negating the ~2.3x tokens-per-step gain. Speculation would benefit from faster target model inference (more GPU offload or a smaller target model).
+
+## Usage
+
+```bash
+# Convert Mistral Eagle head to GGUF
+python convert_hf_to_gguf.py /path/to/Mistral-Large-3-675B-Instruct-2512-Eagle \
+  --outtype q8_0 --outfile mistral-eagle-v1-q8_0.gguf
+
+# Run speculative decoding
+./build/bin/llama-speculative-simple \
+  -m /path/to/Mistral-Large-3-Q4_K_M.gguf \
+  -md /path/to/mistral-eagle-v1-q8_0.gguf \
+  --eagle3 --no-mmap -devd CUDA3 -ngld 99 \
+  -ngl 4 -c 2048 --draft 8 -n 128 \
+  -p "Write a short essay about the future of artificial intelligence."
+```
+
+## Upstream
+
+This fork is based on llama.cpp build 8150 ([ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)), incorporating [PR #18039](https://github.com/ggml-org/llama.cpp/pull/18039) (Eagle-3 support). All upstream code is licensed under the [MIT License](LICENSE).
+
+---
+
+*For the full llama.cpp documentation, see the [upstream repository](https://github.com/ggml-org/llama.cpp).*
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
 [![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
 
