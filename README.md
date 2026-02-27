@@ -6,7 +6,12 @@ This is a fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) that adds *
 
 ## What this fork adds
 
-The `eagle3` branch introduces a new **`eagle3_ds`** architecture (EAGLE3-DeepSeekV2) that supports both EAGLE v1/v2 and Eagle-3 style speculative decoding for models using the DeepSeek V2 architecture (MLA attention + MoE), including Mistral Large 3.
+The `eagle3` branch introduces a new **`eagle3_ds`** architecture (EAGLE3-DeepSeekV2) that supports both EAGLE v1/v2 and Eagle-3 style speculative decoding for models using the DeepSeek V2 architecture (MLA attention + MoE), including:
+
+- **Mistral Large 3** (675B) — EAGLE v1/v2 via [Mistral Eagle head](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle)
+- **DeepSeek R1** (671B) — Eagle-3/MTP via [DeepSeek-R1-NextN](https://huggingface.co/lmsys/DeepSeek-R1-NextN)
+- **DeepSeek V3** (671B) — Eagle-3/MTP via built-in NextN/MTP module
+- **DeepSeek V2** (236B) — any compatible EAGLE draft head
 
 ### Key changes (13 files, 3 commits)
 
@@ -34,7 +39,9 @@ The `eagle3` branch introduces a new **`eagle3_ds`** architecture (EAGLE3-DeepSe
 
 ## Results
 
-Tested with Mistral Large 3 675B Q4_K_M (383 GB) on 4x Tesla P40 + 503 GB RAM:
+### Mistral Large 3 675B (EAGLE v1)
+
+Tested with Q4_K_M (383 GB) on 4x Tesla P40 + 503 GB RAM:
 
 | Metric | Value |
 |--------|-------|
