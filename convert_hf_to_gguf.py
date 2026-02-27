@@ -8220,6 +8220,121 @@ class DeepseekV2Model(TextModel):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
+@ModelBase.register("DeepseekV3ForCausalLMNextN")
+class DeepseekV3NextNModel(DeepseekV2Model):
+    """Converts DeepSeek V3/R1 NextN MTP draft head to eagle3_ds GGUF for speculative decoding."""
+    model_arch = gguf.MODEL_ARCH.EAGLE3_DS
+    skip_mtp = False  # We ARE the MTP layer
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if not hasattr(self, 'target_model_dir') or not self.target_model_dir:
+            raise ValueError(
+                "DeepSeek NextN model requires --target-model-dir to be specified. "
+                "Please provide the path to the target model directory."
+            )
+
+        # Read target model config
+        with open(self.target_model_dir / "config.json", 'r', encoding='utf-8') as f:
+            self.target_config = json.load(f)
+
+        # Override to 1 layer (single MTP decoder)
+        self.block_count = 1
+        self.hparams["num_hidden_layers"] = 1
+
+        # Re-initialize tensor_map and writer for eagle3_ds architecture
+        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+        self.gguf_writer.arch = gguf.MODEL_ARCH_NAMES[self.model_arch]
+        self.gguf_writer.add_architecture()
+
+        logger.info("Detected DeepSeek NextN MTP draft head, using eagle3_ds architecture")
+
+    def set_vocab(self):
+        # Use target model's tokenizer
+        original_dir = self.dir_model
+        self.dir_model = self.target_model_dir
+        try:
+            super().set_vocab()
+        finally:
+            self.dir_model = original_dir
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        # Override: the MTP layer is always MoE (not dense), regardless of target model's first_k_dense_replace
+        self.gguf_writer.add_leading_dense_block_count(0)
+
+        arch_name = self.gguf_writer.arch
+
+        # Eagle3 metadata: extract from last target layer
+        target_num_layers = self.target_config["num_hidden_layers"]
+        extract_layers = [target_num_layers - 1]
+        self.gguf_writer.add_array(f"{arch_name}.extract_layers", extract_layers)
+        logger.info(f"NextN: extract_layers = {extract_layers}")
+
+        target_hidden_size = self.target_config["hidden_size"]
+        self.gguf_writer.add_uint32(f"{arch_name}.target_hidden_size", target_hidden_size)
+        logger.info(f"NextN: target_hidden_size = {target_hidden_size}")
+
+        # MTP method
+        self.gguf_writer.add_string(f"{arch_name}.eagle_method", "mtp")
+        logger.info("NextN: eagle_method = mtp")
+
+        # Gating function (DeepSeek uses sigmoid, Mistral uses softmax)
+        scoring_func = self.hparams.get("scoring_func", "softmax")
+        if scoring_func == "sigmoid":
+            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
+        elif scoring_func == "softmax":
+            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SOFTMAX)
+        logger.info(f"NextN: scoring_func = {scoring_func}")
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Map NextN-specific tensor names before standard processing
+        if name == "model.layers.0.eh_proj.weight":
+            # eh_proj → fc.weight (feature fusion / concat projection)
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.EAGLE3_FC), data_torch)
+            return
+
+        if name == "model.layers.0.enorm.weight":
+            # enorm → nextn.enorm (embedding pre-norm)
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.NEXTN_ENORM, bid=0), data_torch)
+            return
+
+        if name == "model.layers.0.hnorm.weight":
+            # hnorm → nextn.hnorm (hidden state pre-norm)
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.NEXTN_HNORM, bid=0), data_torch)
+            return
+
+        if name == "model.layers.0.shared_head.norm.weight":
+            # shared_head.norm → output_norm
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT_NORM), data_torch)
+            return
+
+        # Skip weight_scale_inv tensors (handled by dequant_model)
+        if name.endswith(".weight_scale_inv"):
+            return
+
+        # Everything else goes through standard DeepseekV2 processing
+        # (handles MLA kv_b_proj split, expert stacking, e_score_correction_bias)
+        yield from super().modify_tensors(data_torch, name, bid)
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        # Load lm_head from target model (NextN model shares the target's lm_head)
+        from safetensors import safe_open
+        lm_head_loaded = False
+        for sf_file in sorted(self.target_model_dir.glob("*.safetensors")):
+            with safe_open(sf_file, framework="pt") as f:
+                if "lm_head.weight" in f.keys():
+                    lm_head = f.get_tensor("lm_head.weight")
+                    logger.info(f"NextN: loaded lm_head from target model {sf_file.name}, shape = {list(lm_head.shape)}")
+                    yield (self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT), lm_head)
+                    lm_head_loaded = True
+                    break
+        if not lm_head_loaded:
+            logger.warning("NextN: no lm_head found in target model, output layer will be missing")
+
+
 @ModelBase.register("MiniMaxM2ForCausalLM")
 class MiniMaxM2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.MINIMAXM2

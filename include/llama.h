@@ -544,7 +544,8 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_embd_inp (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_embd_out (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
-    LLAMA_API bool    llama_model_eagle_is_v1(const struct llama_model * model);
+    LLAMA_API bool    llama_model_eagle_is_v1 (const struct llama_model * model);
+    LLAMA_API bool    llama_model_eagle_is_mtp(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);

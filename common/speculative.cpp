@@ -506,7 +506,8 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
         auto & smpl        = spec->smpl;
 
         const auto * model_dft = llama_get_model(ctx_dft_dec);
-        const bool eagle_v1 = llama_model_eagle_is_v1(model_dft);
+        const bool eagle_v1  = llama_model_eagle_is_v1(model_dft);
+        const bool eagle_mtp = llama_model_eagle_is_mtp(model_dft);
 
         const int n_embd = llama_model_n_embd(model_dft);
         const int n      = (int)prompt_tgt.size();
@@ -518,9 +519,10 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
         // Clear draft positions from decoder KV cache [n_past, inf)
         llama_memory_seq_rm(llama_get_memory(ctx_dft_dec), 0, spec->eagle3_n_past, -1);
 
-        if (eagle_v1) {
-            // EAGLE v1/v2: pass result_norm (final hidden state) as g_embeddings to decoder
+        if (eagle_v1 || eagle_mtp) {
+            // EAGLE v1/v2 & MTP: pass result_norm (final hidden state) as g_embeddings to decoder
             // The decoder will do FC(concat(embedding, g_embeddings)) internally
+            // Note: MTP ideally needs pre-norm state, but result_norm works as approximation
             const float * result_norm = llama_get_eagle_result_norm(ctx_tgt);
             GGML_ASSERT(result_norm && "no result_norm features");
 
@@ -990,11 +992,12 @@ common_speculative * common_speculative_init(
 
     if (params.model_dft) {
         if (params.eagle3) {
-            const bool eagle_v1 = llama_model_eagle_is_v1(params.model_dft);
+            const bool eagle_v1  = llama_model_eagle_is_v1(params.model_dft);
+            const bool eagle_mtp = llama_model_eagle_is_mtp(params.model_dft);
 
-            // EAGLE v1/v2: no encoder needed (result_norm passed directly as g_embeddings)
+            // EAGLE v1/v2 & MTP: no encoder needed (result_norm passed directly as g_embeddings)
             // Eagle-3: encoder processes multi-layer features through FC
-            if (!eagle_v1) {
+            if (!eagle_v1 && !eagle_mtp) {
                 llama_context_params params_enc = params.cparams_dft;
                 params_enc.target_model = nullptr;
                 params_enc.embeddings = true;

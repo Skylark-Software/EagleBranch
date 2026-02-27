@@ -1080,11 +1080,12 @@ void llama_context::set_eagle3(const llama_model * model) {
 
     const auto & eagle3_hparams = model->hparams;
 
-    if (eagle3_hparams.eagle_is_v1) {
-        // EAGLE v1/v2: only need result_norm (post-norm final hidden state), no intermediate layer extraction
+    if (eagle3_hparams.eagle_is_v1 || eagle3_hparams.eagle_is_mtp) {
+        // EAGLE v1/v2 & MTP: only need result_norm (post-norm final hidden state), no intermediate layer extraction
         eagle3.extract_layer_indices.clear();
         eagle3.extract_tensors.clear();
-        LLAMA_LOG_INFO("%s: EAGLE v1/v2 mode - will capture result_norm from target model\n", __func__);
+        LLAMA_LOG_INFO("%s: EAGLE %s mode - will capture result_norm from target model\n", __func__,
+                       eagle3_hparams.eagle_is_mtp ? "MTP" : "v1/v2");
     } else {
         // Eagle-3: extract from intermediate layers
         const int n_extract = eagle3_hparams.eagle3_n_extract;
@@ -1205,7 +1206,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     // EAGLE v1/v2: encoder not used, but if called use 2*target_hidden_size
     int64_t n_embd;
     if ((model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_EAGLE3_DS) && batch_inp.embd) {
-        n_embd = hparams.eagle_is_v1
+        n_embd = (hparams.eagle_is_v1 || hparams.eagle_is_mtp)
             ? 2 * (int64_t)hparams.eagle3_target_hidden_size
             : hparams.eagle3_n_extract * (int64_t)hparams.eagle3_target_hidden_size;
     } else {

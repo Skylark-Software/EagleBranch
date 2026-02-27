@@ -215,6 +215,9 @@ struct llama_hparams {
     // EAGLE method: false = Eagle-3 (multi-layer features), true = EAGLE v1/v2 (last hidden + embedding)
     bool eagle_is_v1 = false;
 
+    // MTP/NextN mode: norm + concat + FC (like v1 but with pre-norms and pre-norm output)
+    bool eagle_is_mtp = false;
+
     // needed by encoder-decoder models (e.g. T5, FLAN-T5)
     // ref: https://github.com/ggml-org/llama.cpp/pull/8141
     llama_token dec_start_token_id = LLAMA_TOKEN_NULL;

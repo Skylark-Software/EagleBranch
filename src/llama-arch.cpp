@@ -2447,6 +2447,7 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 // MoE FFN tensors
                 LLM_TENSOR_FFN_NORM,
                 LLM_TENSOR_FFN_GATE_INP,
+                LLM_TENSOR_FFN_EXP_PROBS_B,
                 LLM_TENSOR_FFN_GATE_EXPS,
                 LLM_TENSOR_FFN_DOWN_EXPS,
                 LLM_TENSOR_FFN_UP_EXPS,
@@ -2457,6 +2458,9 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_EAGLE3_HIDDEN_NORM,
                 LLM_TENSOR_EAGLE3_FC,
                 LLM_TENSOR_EAGLE3_D2T,
+                // NextN/MTP specific layers
+                LLM_TENSOR_NEXTN_ENORM,
+                LLM_TENSOR_NEXTN_HNORM,
             };
         case LLM_ARCH_MIMO2:
             return {

@@ -2532,13 +2532,16 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 LLAMA_LOG_INFO("%s: EAGLE3_DS target_hidden_size = %u (draft n_embd = %u)\n", __func__,
                                hparams.eagle3_target_hidden_size, hparams.n_embd);
 
-                // Check eagle_method: "eagle" = EAGLE v1/v2, "eagle3" = Eagle-3
+                // Check eagle_method: "eagle" = EAGLE v1/v2, "eagle3" = Eagle-3, "mtp" = NextN/MTP
                 {
                     std::string eagle_method;
                     if (ml.get_key(LLM_KV_EAGLE3_METHOD, eagle_method, false)) {
                         hparams.eagle_is_v1 = (eagle_method == "eagle");
-                        LLAMA_LOG_INFO("%s: EAGLE3_DS eagle_method = %s (is_v1 = %s)\n", __func__,
-                                       eagle_method.c_str(), hparams.eagle_is_v1 ? "true" : "false");
+                        hparams.eagle_is_mtp = (eagle_method == "mtp");
+                        LLAMA_LOG_INFO("%s: EAGLE3_DS eagle_method = %s (is_v1 = %s, is_mtp = %s)\n", __func__,
+                                       eagle_method.c_str(),
+                                       hparams.eagle_is_v1 ? "true" : "false",
+                                       hparams.eagle_is_mtp ? "true" : "false");
                     }
                 }
 
@@ -7271,9 +7274,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             case LLM_ARCH_EAGLE3_DS:
                 {
                     const int64_t n_extract = hparams.eagle3_n_extract;
-                    // EAGLE v1/v2: FC input = concat(embedding, hidden) = 2 * n_embd
-                    // Eagle-3:     FC input = concat(layer_features) = n_extract * target_hidden_size
-                    const int64_t n_embd_target_features = hparams.eagle_is_v1
+                    // EAGLE v1/v2 & MTP: FC input = concat(embedding, hidden) = 2 * n_embd
+                    // Eagle-3:          FC input = concat(layer_features) = n_extract * target_hidden_size
+                    const int64_t n_embd_target_features = (hparams.eagle_is_v1 || hparams.eagle_is_mtp)
                         ? 2 * (int64_t)hparams.eagle3_target_hidden_size
                         : n_extract * (int64_t)hparams.eagle3_target_hidden_size;
                     const bool is_mla = hparams.is_mla();
@@ -7310,6 +7313,10 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         // EAGLE-3 specific: hidden_norm
                         layer.eagle3_hidden_norm = create_tensor(tn(LLM_TENSOR_EAGLE3_HIDDEN_NORM, "weight", i), {n_embd}, TENSOR_NOT_REQUIRED);
 
+                        // NextN/MTP specific: enorm and hnorm (pre-fusion norms)
+                        layer.nextn.enorm = create_tensor(tn(LLM_TENSOR_NEXTN_ENORM, "weight", i), {n_embd}, TENSOR_NOT_REQUIRED);
+                        layer.nextn.hnorm = create_tensor(tn(LLM_TENSOR_NEXTN_HNORM, "weight", i), {n_embd}, TENSOR_NOT_REQUIRED);
+
                         // MLA attention (DeepSeek V2 style)
                         layer.wq_a = create_tensor(tn(LLM_TENSOR_ATTN_Q_A, "weight", i), {n_embd, q_lora_rank}, 0);
                         layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", i), {q_lora_rank}, 0);
@@ -7333,10 +7340,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         const int64_t n_ff_exp        = hparams.n_ff_exp;
                         const int64_t n_expert_shared = hparams.n_expert_shared;
 
-                        layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
-                        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
-                        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd, n_expert}, 0);
-                        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+                        layer.ffn_gate_inp    = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+                        layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_gate_exps   = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+                        layer.ffn_down_exps   = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd, n_expert}, 0);
+                        layer.ffn_up_exps     = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
 
                         // Shared expert
                         layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_exp * n_expert_shared}, TENSOR_NOT_REQUIRED);
@@ -9134,6 +9142,10 @@ int32_t llama_model_n_layer(const llama_model * model) {
 
 bool llama_model_eagle_is_v1(const llama_model * model) {
     return model->hparams.eagle_is_v1;
+}
+
+bool llama_model_eagle_is_mtp(const llama_model * model) {
+    return model->hparams.eagle_is_mtp;
 }
 
 int32_t llama_model_n_head(const llama_model * model) {

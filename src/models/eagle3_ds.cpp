@@ -91,8 +91,28 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
     cb(inp_g, "inp_g_embeddings", -1);
 
     const bool eagle_v1 = hparams.eagle_is_v1;
+    const bool eagle_mtp = hparams.eagle_is_mtp;
 
-    if (eagle_v1) {
+    if (eagle_mtp) {
+        // MTP/NextN: enorm(embd) + hnorm(hidden) → concat → eh_proj → decoder input
+        ggml_tensor * embd_norm = build_norm(inp_embd,
+                model.layers[0].nextn.enorm, NULL,
+                LLM_NORM_RMS, -1);
+        cb(embd_norm, "mtp_embd_norm", -1);
+
+        ggml_tensor * g_norm = build_norm(inp_g,
+                model.layers[0].nextn.hnorm, NULL,
+                LLM_NORM_RMS, -1);
+        cb(g_norm, "mtp_g_norm", -1);
+
+        ggml_tensor * concat_input = ggml_concat(ctx0, embd_norm, g_norm, 0);  // [2*n_embd, n_tokens]
+        cb(concat_input, "mtp_concat", -1);
+
+        cur = build_lora_mm(model.fc, concat_input);  // eh_proj: [2*n_embd] -> [n_embd]
+        cb(cur, "mtp_fc_out", -1);
+
+        inpL = cur;  // residual from FC output
+    } else if (eagle_v1) {
         // EAGLE v1/v2: FC(concat(embedding, hidden_state)) -> decoder input
         // inp_embd = token embeddings [n_embd, n_tokens]
         // inp_g    = final hidden state from target model [n_embd, n_tokens]
@@ -118,8 +138,8 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
     // Single decoder layer (il = 0)
     const int il = 0;
     {
-        if (eagle_v1) {
-            // EAGLE v1/v2: apply attn_norm to the FC output (standard transformer pre-norm)
+        if (eagle_v1 || eagle_mtp) {
+            // EAGLE v1/v2 & MTP: apply attn_norm to the FC output (standard transformer pre-norm)
             cur = build_norm(inpL,
                     model.layers[il].attn_norm, NULL,
                     LLM_NORM_RMS, il);
@@ -311,7 +331,7 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
 
     cur = inpL;
 
-    if (eagle_v1) {
+    if (eagle_v1 && !eagle_mtp) {
         // EAGLE v1/v2: output post-norm state for autoregressive g_embeddings
         // Must match target model's result_norm (post-norm) for consistent FC input
         cur = build_norm(cur,
@@ -322,7 +342,8 @@ llm_build_eagle3_ds_decode::llm_build_eagle3_ds_decode(const llama_model & model
         ggml_set_output(cur);
         res->t_embd = cur;
     } else {
-        // Eagle-3: output prenorm state (for next token's g_embeddings)
+        // Eagle-3 / MTP: output prenorm state (for next token's g_embeddings)
+        // MTP: hnorm expects pre-norm hidden state
         ggml_set_output(cur);
         res->t_embd = cur;
 
