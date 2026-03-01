@@ -5,7 +5,11 @@
 // Same concept as eagle3 encoder but supports variable number of extraction layers (2 or 3)
 llm_build_eagle3_ds_encode::llm_build_eagle3_ds_encode(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
     const int n_extract = hparams.eagle3_n_extract;
-    const int64_t n_embd_target_features = n_extract * hparams.eagle3_target_hidden_size;
+    // EAGLE v1/v2 & MTP: FC input = concat(embedding, hidden) = 2 * target_hidden_size
+    // Eagle-3:           FC input = concat(layer_features) = n_extract * target_hidden_size
+    const int64_t n_embd_target_features = (hparams.eagle_is_v1 || hparams.eagle_is_mtp)
+        ? 2 * (int64_t)hparams.eagle3_target_hidden_size
+        : n_extract * (int64_t)hparams.eagle3_target_hidden_size;
 
     ggml_tensor * cur = nullptr;
 

@@ -990,6 +990,12 @@ common_speculative * common_speculative_init(
     llama_context * ctx_dft_enc = nullptr;
     llama_context * ctx_dft_dec = nullptr;
 
+    // Derive target model from ctx_tgt if not explicitly set
+    // (the server does not set model_tgt, only speculative-simple does)
+    if (!params.model_tgt && ctx_tgt) {
+        params.model_tgt = const_cast<llama_model *>(llama_get_model(ctx_tgt));
+    }
+
     if (params.model_dft) {
         if (params.eagle3) {
             const bool eagle_v1  = llama_model_eagle_is_v1(params.model_dft);
@@ -1019,6 +1025,10 @@ common_speculative * common_speculative_init(
                 LOG_ERR("failed to create EAGLE3 decoder context\n");
                 return nullptr;
             }
+
+            // Enable feature extraction on the target context
+            // (speculative-simple does this manually; automate it here for server)
+            llama_set_eagle3(ctx_tgt, params.model_dft);
         } else {
             ctx_dft = llama_init_from_model(params.model_dft, params.cparams_dft);
             if (ctx_dft == nullptr) {
