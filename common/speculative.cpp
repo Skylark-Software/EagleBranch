@@ -489,6 +489,9 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
     }
 
     void begin(const llama_tokens & prompt) override {
+        // Reset decoder KV cache state for new generation
+        eagle3_n_past = 0;
+        llama_memory_seq_rm(llama_get_memory(ctx_dft_dec), 0, -1, -1);
         GGML_UNUSED(prompt);
     }
 
