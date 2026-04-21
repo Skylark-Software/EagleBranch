@@ -4667,6 +4667,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             {
                 ggml_type src0_type = op->src[0]->type;
                 ggml_type src1_type = op->src[1]->type;
+                // Same-type quant copy (contiguous: cudaMemcpyAsync, non-contig:
+                // cpy_blck_quant_same kernel). Unblocks MLA KV views on
+                // Mistral Large 3 / Kimi / DeepSeek R1 with K=iq4_nl / q8_0 / etc.
+                if (src0_type == src1_type && ggml_is_quantized(src0_type)) {
+                    return true;
+                }
                 if ((src0_type == GGML_TYPE_F32 || src0_type == GGML_TYPE_BF16 || src0_type == GGML_TYPE_F16) &&
                     (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_BF16 || src1_type == GGML_TYPE_F16)
                 ) {
