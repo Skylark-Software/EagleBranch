@@ -1808,6 +1808,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         if (!v_trans) {
             // note: avoid this branch
+            // For MLA with quantized K cache, v here is a VIEW of the K cache
+            // (same quant type). The subsequent ggml_transpose + ggml_cont
+            // would require a transposed-quant-to-quant CUDA cpy, which has
+            // no dispatch (cpy.cu:547 abort on iq4_nl→iq4_nl). Dequantize V
+            // to f16 first so the transpose + cont uses the proven f16 path.
+            // This increases attention-time working memory but leaves the
+            // persistent KV cache at its quantized type.
+            if (ggml_is_quantized(v->type)) {
+                v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+                cb(v, "v_dequant", il);
+            }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
             cb(v, "v_cont", il);
         }
