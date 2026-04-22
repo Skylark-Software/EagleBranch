@@ -75,3 +75,16 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
     v.x *= d;
     v.y *= d;
 }
+
+// iq4_nl uses a 16-entry lookup table (kvalues_iq4nl); its QK_NL is 32.
+// Returns two f32 values corresponding to qs[iqs] (low nibble) and
+// qs[iqs + QK4_NL/2] (high nibble of the paired byte). This mirrors the
+// Q4_0 convention where dequant produces (val_low, val_high) for one byte,
+// then the caller stores them at offsets {j, j + qk/2}.
+static __device__ __forceinline__ void dequantize_iq4_nl(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_iq4_nl * x = (const block_iq4_nl *) vx;
+    const float d = (float) x[ib].d;
+    const uint8_t vui = x[ib].qs[iqs];
+    v.x = d * kvalues_iq4nl[vui & 0xf];
+    v.y = d * kvalues_iq4nl[vui >>  4];
+}
