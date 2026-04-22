@@ -4711,8 +4711,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_IQ4_NL) {
                     return true;
                 }
-                if (src0_type == GGML_TYPE_IQ4_NL && src1_type == GGML_TYPE_F32) {
-                    // enables ggml_cast(iq4_nl, F32) to stay on CUDA without
+                if (src0_type == GGML_TYPE_IQ4_NL &&
+                    (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_F16)) {
+                    // enables ggml_cast(iq4_nl, F32/F16) to stay on CUDA without
                     // a CPU round-trip (used by the MLA non-FA V-dequant path).
                     return true;
                 }

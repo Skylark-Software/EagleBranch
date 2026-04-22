@@ -1816,10 +1816,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // This increases attention-time working memory but leaves the
             // persistent KV cache at its quantized type.
             if (ggml_is_quantized(v->type)) {
-                // Cast to F32 — ggml-cpu/ops.cpp:567 only implements
-                // is_quantized→F32, not →F16. Going through F32 keeps the
-                // scheduler happy on both CUDA and CPU backends.
-                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
+                // Cast to F16 — half the intermediate memory and transpose
+                // work vs F32. Requires CUDA IQ4_NL→F16 dispatch in
+                // ggml-cuda/cpy.cu (added alongside this change). The
+                // scheduler keeps the op on CUDA since the V view lives there.
+                v = ggml_cast(ctx0, v, GGML_TYPE_F16);
                 cb(v, "v_dequant", il);
             }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
