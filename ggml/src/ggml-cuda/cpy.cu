@@ -168,32 +168,37 @@ static __global__ void cpy_q_f32(const char * cx, char * cdst, const int64_t ne,
     cpy_blck(cx + x_offset, cdst + dst_offset);
 }
 
-// Non-contiguous same-type copy for quantized tensors. One thread per block,
-// each thread byte-copies `type_size` bytes from src block to dst block at
-// the strides indicated by nb0X / nb1X. Fixes upstream bug where
-// iq4_nl->iq4_nl strided copies (as scheduled by MLA KV views on some models
-// like Mistral Large 3 and Kimi K2.5) fell through to GGML_ABORT.
+// Non-contiguous same-type copy for quantized tensors. Matches the CPU
+// ggml_compute_forward_dup_bytes behavior: walk src and dst blocks in
+// parallel by the linear block index N, using each tensor's own dim-0
+// block count. Handles reshape copies where ne00 != ne10.
+//
+// Fixes upstream bug where iq4_nl->iq4_nl strided copies (scheduled by
+// MLA KV views on Mistral Large 3 / Kimi K2.5) fell through to GGML_ABORT.
 static __global__ void cpy_blck_quant_same(
-        const char * __restrict__ cx, char * __restrict__ cdst, const int64_t ne,
-        const int64_t ne00, const int64_t ne01, const int64_t ne02,
+        const char * __restrict__ cx, char * __restrict__ cdst,
+        const int64_t num_blocks,
+        const int64_t nk00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
         const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
-        const int64_t ne10, const int64_t ne11, const int64_t ne12,
+        const int64_t nk10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
         const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
-        const int qk, const int type_size) {
-    const int64_t i = ((int64_t)blockDim.x*blockIdx.x + threadIdx.x) * qk;
-    if (i >= ne) return;
+        const int type_size) {
+    const int64_t N = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
+    if (N >= num_blocks) return;
 
-    const int64_t i03 = i / (ne00 * ne01 * ne02);
-    const int64_t i02 = (i - i03*ne00*ne01*ne02) / (ne00*ne01);
-    const int64_t i01 = (i - i03*ne00*ne01*ne02 - i02*ne00*ne01) / ne00;
-    const int64_t i00 = i - i03*ne00*ne01*ne02 - i02*ne00*ne01 - i01*ne00;
-    const int64_t src_offset = (i00/qk)*nb00 + i01*nb01 + i02*nb02 + i03*nb03;
+    // src block coords derived from N in src's block layout
+    const int64_t k00 = N % nk00;
+    const int64_t i01 = (N / nk00) % ne01;
+    const int64_t i02 = (N / (nk00 * ne01)) % ne02;
+    const int64_t i03 = (N / (nk00 * ne01 * ne02)) % ne03;
+    const int64_t src_offset = k00*nb00 + i01*nb01 + i02*nb02 + i03*nb03;
 
-    const int64_t i13 = i / (ne10 * ne11 * ne12);
-    const int64_t i12 = (i - i13*ne10*ne11*ne12) / (ne10*ne11);
-    const int64_t i11 = (i - i13*ne10*ne11*ne12 - i12*ne10*ne11) / ne10;
-    const int64_t i10 = i - i13*ne10*ne11*ne12 - i12*ne10*ne11 - i11*ne10;
-    const int64_t dst_offset = (i10/qk)*nb10 + i11*nb11 + i12*nb12 + i13*nb13;
+    // dst block coords from the same N in dst's (potentially different) block layout
+    const int64_t k10 = N % nk10;
+    const int64_t i11 = (N / nk10) % ne11;
+    const int64_t i12 = (N / (nk10 * ne11)) % ne12;
+    const int64_t i13 = (N / (nk10 * ne11 * ne12)) % ne13;
+    const int64_t dst_offset = k10*nb10 + i11*nb11 + i12*nb12 + i13*nb13;
 
     // byte-wise copy of one quant block
     const char * src = cx + src_offset;
@@ -202,21 +207,27 @@ static __global__ void cpy_blck_quant_same(
 }
 
 static void ggml_cpy_quant_same_cuda(
-        const char * cx, char * cdst, const int64_t ne,
-        const int64_t ne00, const int64_t ne01, const int64_t ne02,
+        const char * cx, char * cdst,
+        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
         const int64_t nb00, const int64_t nb01, const int64_t nb02, const int64_t nb03,
-        const int64_t ne10, const int64_t ne11, const int64_t ne12,
+        const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
         const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13,
         const int qk, const int type_size,
         cudaStream_t stream) {
-    GGML_ASSERT(ne % qk == 0);
-    const int64_t num_blocks = ne / qk;
+    GGML_ASSERT(ne00 % qk == 0);
+    GGML_ASSERT(ne10 % qk == 0);
+    const int64_t nk00 = ne00 / qk;
+    const int64_t nk10 = ne10 / qk;
+    const int64_t num_blocks = nk00 * ne01 * ne02 * ne03;
+    GGML_ASSERT(num_blocks == nk10 * ne11 * ne12 * ne13);
     const int threads = 256;
     const int64_t grid = (num_blocks + threads - 1) / threads;
     GGML_ASSERT(grid < UINT_MAX);
     cpy_blck_quant_same<<<grid, threads, 0, stream>>>(
-            cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
-            ne10, ne11, ne12, nb10, nb11, nb12, nb13, qk, type_size);
+            cx, cdst, num_blocks,
+            nk00, ne01, ne02, ne03, nb00, nb01, nb02, nb03,
+            nk10, ne11, ne12, ne13, nb10, nb11, nb12, nb13,
+            type_size);
 }
 
 template<typename src_t, typename dst_t>
@@ -599,8 +610,10 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
         // contiguous case (cudaMemcpyAsync path above); without this fallback,
         // MLA KV views on Mistral Large 3 / Kimi with K=iq4_nl abort here.
         ggml_cpy_quant_same_cuda(
-                src0_ddc, src1_ddc, ne, ne00, ne01, ne02,
-                nb00, nb01, nb02, nb03, ne10, ne11, ne12,
+                src0_ddc, src1_ddc,
+                ne00, ne01, ne02, src0->ne[3],
+                nb00, nb01, nb02, nb03,
+                ne10, ne11, ne12, src1->ne[3],
                 nb10, nb11, nb12, nb13,
                 (int) ggml_blck_size(src0->type), (int) ggml_type_size(src0->type),
                 main_stream);
