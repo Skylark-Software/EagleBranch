@@ -1816,11 +1816,16 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // This increases attention-time working memory but leaves the
             // persistent KV cache at its quantized type.
             if (ggml_is_quantized(v->type)) {
-                // Cast to F16 — half the intermediate memory and transpose
-                // work vs F32. Requires CUDA IQ4_NL→F16 dispatch in
-                // ggml-cuda/cpy.cu (added alongside this change). The
-                // scheduler keeps the op on CUDA since the V view lives there.
-                v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+                // Cast to F32. On Pascal (SM61) F32 actually measures faster
+                // than F16 for the subsequent transpose+cont+matmul because
+                // fp16 compute is rate-limited; the smaller intermediate
+                // doesn't win back the arithmetic cost. Measured on
+                // Mistral Large 3 / 16K ctx: F32 3.32 tok/s, F16 3.06 tok/s.
+                // F32 also works on CPU backend (ops.cpp:567), so the
+                // scheduler has full flexibility. The CUDA IQ4_NL→F32 and
+                // IQ4_NL→F16 dispatches in cpy.cu are kept for correctness
+                // on other code paths that may need them.
+                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
                 cb(v, "v_dequant", il);
             }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
