@@ -1,4 +1,4 @@
-# Skylark EagleBranch
+# EagleBranch
 
 **3-bit KV cache compression and EAGLE speculative decoding for
 llama.cpp — designed for legacy hardware, works on the new stuff too.**
