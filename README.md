@@ -1,3 +1,5 @@
+<a href="https://skylarksoftware.me"><img src="https://skylarksoftware.me/images/skylark-software-logo.svg" alt="Skylark Software" align="right" height="80"></a>
+
 # EagleBranch
 
 **3-bit KV cache compression and EAGLE speculative decoding for
