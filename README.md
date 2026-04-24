@@ -71,7 +71,7 @@ A pre-built binary including the proprietary KV compression (TBQ3_1,
 TBQ3_2 with Lane B fused matvec) and custom speculative decoding
 extensions is distributed separately. Binary releases include a
 `NOTICE` file with MIT attribution for llama.cpp and proprietary
-copyright for the Skylark additions. Contact **jay_brame@hotmail.com**
+copyright for the Skylark additions. Contact **Jay.Brame@SkylarkSoftware.me**
 for access and licensing inquiries.
 
 ## Relationship to upstream
