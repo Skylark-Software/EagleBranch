@@ -1,4 +1,98 @@
-# llama.cpp
+# Skylark EagleBranch
+
+A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) focused on MLA
+(multi-head latent attention) models — Mistral Large 3, DeepSeek R1/V2/V3,
+Kimi K2/K2.5 — running on sub-SM80 NVIDIA GPUs (Pascal P40, P100, etc.)
+where upstream's Flash Attention kernels don't apply to MLA's head_dim=576.
+
+This public branch contains the MIT-compatible portions of the work:
+general-purpose fixes that benefit any quantized-KV + MLA deployment on
+older hardware. Proprietary additions (TBQ3_1 / TBQ3_2 KV compression,
+Lane B rotated-domain matvec, custom EAGLE v1 / MTP speculative decoding)
+are distributed separately in binary form only — see the `NOTICE` file
+in a release bundle for details.
+
+## What this branch fixes over upstream llama.cpp
+
+All eight commits on this branch are additive fixes to mainline bugs
+encountered when running MLA models with quantized K cache on Pascal:
+
+### 1. MLA V-cast graph fix — unblocks IQ4_NL K on MLA
+
+**Mainline bug**: at MLA's non-FA attention node, V is a view of the
+quantized K cache. `ggml_cuda_cpy` hits
+`unsupported type combination (iq4_nl to iq4_nl)` when the graph inserts
+`ggml_cont(ggml_transpose(v))` — no backend has a transposed
+quant-to-quant CPY kernel.
+
+**Fix**: insert `ggml_cast(v, F32)` before the transpose+cont in
+`llama-graph.cpp`'s `build_attn_mha` (non-FA branch). Supported via
+`to_fp32_cuda` (see also the new CPY dispatches below). Four commits
+progressively refine this — F16 intermediate was tried but reverted
+because Pascal's fp16 compute tax outweighs the halved bandwidth.
+
+Affects: DeepSeek R1/V2/V3, Mistral Large 3, Kimi K2/K2.5 with
+`--cache-type-k iq4_nl` on P40-class hardware.
+
+### 2. CUDA CPY dispatches for IQ4_NL → F32 / F16
+
+Mainline only had quant-to-quant CPY. With the V-cast fix above we need
+IQ4_NL → F32 (and F16). Adds `ggml_cuda_op_cpy_iq4_nl_f32` and the F16
+variant — dequant + cast in a single kernel. Keeps the dequant on GPU
+instead of round-tripping through CPU.
+
+### 3. Non-contiguous same-type quant copy
+
+**Mainline bug**: server's `common_speculative_is_compat` load-time
+probe schedules `iq4_nl → iq4_nl` with non-contiguous strides. The
+existing same-type path uses `cudaMemcpyAsync` (contiguous only) and
+falls through to the unsupported-combination abort.
+
+**Fix**: `cpy_blck_quant_same` — a generic kernel that walks the linear
+block index through each tensor's own block layout (mirrors
+`ggml_compute_forward_dup_bytes` on CPU). Block identity is ordinal
+(src block N → dst block N), so it works across reshape/flatten copies.
+
+## Upstream PR notes
+
+See [UPSTREAM_PR_NOTES.md](./UPSTREAM_PR_NOTES.md) for a PR-ready
+write-up of the MLA V-cast fix with repro steps, minimal diff, and
+test coverage notes.
+
+## Building
+
+Same as upstream — this branch is a superset of a specific upstream
+commit, not a refactor. Standard CMake:
+
+```
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llama-server -j
+```
+
+Verified on CUDA 12.x with SM61 (Pascal P40) through SM90 (Hopper).
+
+## Binary distribution
+
+A pre-built binary including the proprietary KV compression (TBQ3_1,
+TBQ3_2 with Lane B fused matvec) and custom speculative decoding
+extensions is distributed separately. Binary releases include a
+`NOTICE` file with MIT attribution for llama.cpp and proprietary
+copyright for the Skylark additions. Contact **jay_brame@hotmail.com**
+for access and licensing inquiries.
+
+## Relationship to upstream
+
+- Based on upstream llama.cpp + EAGLE-3 PR #18039 base
+- Syncs from upstream via `git merge` periodically (not via PRs)
+- No attempts to upstream these fixes directly (some fall under
+  AI-authorship restrictions in the upstream `AGENTS.md`); the work
+  is shared under MIT here so others can pick it up, lift the
+  individual commits into a human-authored PR, or use the branch
+  directly
+
+----
+
+# llama.cpp (upstream — below this point)
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 
