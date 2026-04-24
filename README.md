@@ -65,6 +65,11 @@ llama.cpp for these specific model families.
 
 - **Trillion-parameter MoE inference on 4× P40 (~$2K of hardware)** —
   Kimi K2.5 (1T parameters, 32B active) runs at 4.72 tok/s with vision.
+- **Multimodal vision on 1T-parameter Kimi K2.5 and 675B Mistral Large 3**
+  — both use pixtral-family mmproj encoders on top of MLA text decoders.
+  Kimi K2.5 requires the `kimik25` projector type (upstream PR #19170);
+  Mistral Large 3 uses a 4.9 GB F16 pixtral encoder. Both work end-to-end
+  on Pascal alongside the MIT quantized-K fixes on this branch.
 - **MLA quantized K cache actually works on Pascal** — upstream crashes
   at load time (`unsupported type combination (iq4_nl to iq4_nl)`); the
   MIT fixes on this branch make it run.
