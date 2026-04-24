@@ -1,13 +1,26 @@
 # Skylark EagleBranch
 
-**Run trillion-parameter MoE language models on Pascal-era NVIDIA hardware.**
+**Run trillion-parameter MoE language models on legacy hardware.**
 
 A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) engineered
-specifically for large MLA-architecture models (Mistral Large 3,
-DeepSeek R1/V2/V3, Kimi K2/K2.5) on pre-SM80 GPUs — Pascal P40, P100,
-GTX 1080/1080 Ti — where upstream's Flash Attention can't reach MLA's
-`head_dim=576` and quantized K-cache configurations crash without
-additional graph fixes.
+for large MLA-architecture models (Mistral Large 3, DeepSeek R1/V2/V3,
+Kimi K2/K2.5) on:
+
+- **Pre-SM80 NVIDIA GPUs** — Pascal P40, P100, GTX 1080/1080 Ti —
+  where upstream's Flash Attention can't reach MLA's `head_dim=576`
+  and quantized K-cache configurations crash without additional
+  graph fixes.
+- **CPU-only inference** — the 3-bit KV cache fits even Kimi K2.5's
+  131K-context KV in a fraction of the memory footprint, and our
+  fused CPU FlashAttention path outperforms GPU KV on MHA models.
+- **Apple Silicon Mac Studio and similar unified-memory systems**
+  (experimental) — 192 GB unified memory plus aggressive KV
+  compression is a natural fit for the 670B+ MoE models this fork
+  targets. The CPU path that wins on x86 should translate.
+
+Two flagship additions beyond the MIT bug fixes in this branch:
+**EAGLE v1/v2/v3 speculative decoding** and **TurboQuant-based
+3-bit KV cache compression** — both distributed as binary.
 
 ## Featured capability — 3-bit KV cache compression *(binary)*
 
