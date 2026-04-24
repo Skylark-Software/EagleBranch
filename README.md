@@ -23,11 +23,17 @@ below.
 - **CPU-only inference** — the 3-bit KV cache makes large KV
   footprints fit in a fraction of memory, and the fused CPU
   FlashAttention path outperforms GPU KV on MHA models.
-- **Apple Silicon (Mac Studio and similar)** — experimental but
-  conceptually a strong fit: unified memory + aggressive KV
-  compression removes the two bottlenecks that usually hurt.
 - **Modern NVIDIA (Ampere / Ada / Hopper)** — also supported; builds
   cleanly SM61 through SM90.
+- **Apple Silicon (Mac Studio and similar)** — untested. Design
+  concept fits (unified memory + KV compression is ideal for big
+  MoE), but the binary is Linux x86_64 + CUDA — it won't run on
+  macOS as-is. Building from source on macOS would compile, and
+  the EAGLE/MTP speculative decoding runtime is
+  architecture-agnostic, but the TurboQuant kernels are CUDA only;
+  a Metal port would be real work. The CPU path is plain C with
+  no NEON acceleration, so it would be correct but not
+  competitively fast on ARM.
 
 Large MoE models fit well on modest hardware as a side effect of
 the compression: Kimi K2.5 (1T params / 32B active) runs at 4.72
