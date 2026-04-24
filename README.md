@@ -1,26 +1,37 @@
 # Skylark EagleBranch
 
-**Run trillion-parameter MoE language models on legacy hardware.**
+**3-bit KV cache compression and EAGLE speculative decoding for
+llama.cpp — designed for legacy hardware, works on the new stuff too.**
 
-A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) engineered
-for large MLA-architecture models (Mistral Large 3, DeepSeek R1/V2/V3,
-Kimi K2/K2.5) on:
+A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) with two
+flagship extensions beyond the MIT bug fixes on this branch:
+
+- **TurboQuant 3-bit KV cache compression** — 5× smaller than f16 KV
+  with measured +2.27% PPL, first-of-its-kind for pre-Ampere NVIDIA
+- **EAGLE v1/v2/v3 speculative decoding** for modern MLA draft heads
+  (Mistral Large 3 Eagle, DeepSeek R1 NextN/MTP)
+
+Both are distributed as binary; see [binary distribution](#binary-distribution)
+below.
+
+## Hardware targets
 
 - **Pre-SM80 NVIDIA GPUs** — Pascal P40, P100, GTX 1080/1080 Ti —
   where upstream's Flash Attention can't reach MLA's `head_dim=576`
   and quantized K-cache configurations crash without additional
-  graph fixes.
-- **CPU-only inference** — the 3-bit KV cache fits even Kimi K2.5's
-  131K-context KV in a fraction of the memory footprint, and our
-  fused CPU FlashAttention path outperforms GPU KV on MHA models.
-- **Apple Silicon Mac Studio and similar unified-memory systems**
-  (experimental) — 192 GB unified memory plus aggressive KV
-  compression is a natural fit for the 670B+ MoE models this fork
-  targets. The CPU path that wins on x86 should translate.
+  graph fixes. This is the primary development target.
+- **CPU-only inference** — the 3-bit KV cache makes large KV
+  footprints fit in a fraction of memory, and the fused CPU
+  FlashAttention path outperforms GPU KV on MHA models.
+- **Apple Silicon (Mac Studio and similar)** — experimental but
+  conceptually a strong fit: unified memory + aggressive KV
+  compression removes the two bottlenecks that usually hurt.
+- **Modern NVIDIA (Ampere / Ada / Hopper)** — also supported; builds
+  cleanly SM61 through SM90.
 
-Two flagship additions beyond the MIT bug fixes in this branch:
-**EAGLE v1/v2/v3 speculative decoding** and **TurboQuant-based
-3-bit KV cache compression** — both distributed as binary.
+Large MoE models fit well on modest hardware as a side effect of
+the compression: Kimi K2.5 (1T params / 32B active) runs at 4.72
+tok/s on four P40s; Mistral Large 3 (675B) at 3.69 tok/s.
 
 ## Featured capability — 3-bit KV cache compression *(binary)*
 
