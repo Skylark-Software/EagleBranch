@@ -4,8 +4,8 @@
 
 # EagleBranch
 
-**3-bit KV cache compression and EAGLE speculative decoding for
-llama.cpp — designed for legacy hardware, works on the new stuff too.**
+**TurboQuant 3-bit KV cache compression and EAGLE speculative decoding with EAGLE for
+llama.cpp — designed for legacy hardware, CPU inference and current hardware.**
 
 A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) with two
 flagship extensions beyond the MIT bug fixes on this branch:
