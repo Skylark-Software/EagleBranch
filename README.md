@@ -1,23 +1,85 @@
 # Skylark EagleBranch
 
-A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) focused on MLA
-(multi-head latent attention) models — Mistral Large 3, DeepSeek R1/V2/V3,
-Kimi K2/K2.5 — running on sub-SM80 NVIDIA GPUs (Pascal P40, P100, etc.)
-where upstream's Flash Attention kernels don't apply to MLA's head_dim=576.
+**Run trillion-parameter MoE language models on Pascal-era NVIDIA hardware.**
 
-This public branch contains the MIT-compatible portions of the work:
-general-purpose fixes that benefit any quantized-KV + MLA deployment on
-older hardware. Proprietary additions (TBQ3_1 / TBQ3_2 KV compression,
-Lane B rotated-domain matvec, custom EAGLE v1 / MTP speculative decoding)
-are distributed separately in binary form only — see the `NOTICE` file
-in a release bundle for details.
+A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) engineered
+specifically for large MLA-architecture models (Mistral Large 3,
+DeepSeek R1/V2/V3, Kimi K2/K2.5) on pre-SM80 GPUs — Pascal P40, P100,
+GTX 1080/1080 Ti — where upstream's Flash Attention can't reach MLA's
+`head_dim=576` and quantized K-cache configurations crash without
+additional graph fixes.
 
-## What this branch fixes over upstream llama.cpp
+## What this enables
 
-All eight commits on this branch are additive fixes to mainline bugs
-encountered when running MLA models with quantized K cache on Pascal:
+- **Trillion-parameter MoE inference on 4× P40 (~$2K of hardware)** —
+  Kimi K2.5 (1T parameters, 32B active) runs at 4.72 tok/s with vision.
+- **MLA quantized K cache actually works on Pascal** — upstream crashes
+  at load time (`unsupported type combination (iq4_nl to iq4_nl)`); the
+  MIT fixes on this branch make it run.
+- **Speculative decoding for modern draft architectures** (binary
+  distribution): EAGLE v1/v2 for Mistral Large 3, MTP/NextN for DeepSeek
+  R1/V3.
+- **3-bit KV cache compression** (binary distribution): up to 5.12×
+  compression vs f16 with measured ≤2.5% PPL degradation.
 
-### 1. MLA V-cast graph fix — unblocks IQ4_NL K on MLA
+## Measured performance (Tesla P40, SM61)
+
+### Large MoE models
+
+| Model | Parameters / Active | Hardware | tok/s | Notes |
+|---|---|---|---|---|
+| **Kimi K2.5** (vision) | 1T / 32B | 4× P40 | **4.72** | K=q8_0, V=f16, 131K ctx |
+| **Mistral Large 3** | 675B / 41B | 4× P40 | **3.69** | K=q8_0, V=f16, 16K ctx |
+| Mistral Large 3 | 675B / 41B | 4× P40 | 3.32 | K=iq4_nl, V=f16 — needs fixes in this branch |
+| DeepSeek R1 | 671B / 37B | 4× P40 | 4.00 | K=iq4_nl, V=f16, 6K ctx |
+| DeepSeek V2 Lite | 16B / 2.4B | 1× P40 | **72** | K=iq4_nl, V=f16 |
+
+### KV cache compression — Mistral Small 24B @ 32K ctx
+
+| KV config | tok/s | KV size | Compression | PPL vs f16 |
+|---|---|---|---|---|
+| f16 baseline | 17.5 | 5120 MB | 1× | 0 |
+| IQ4_NL | 15.4 | 1440 MB | 3.56× | +0.52% |
+| TBQ3_1 CPU path *(binary)* | **15.9** | **1000 MB** | **5.12×** | +2.27% |
+
+CPU-path TurboQuant actually **beats GPU KV** on MHA models because
+fused CPU FlashAttention amortizes the dequant cost better than the
+separate CUDA MUL_MAT path.
+
+## What's included on this branch (MIT)
+
+General-purpose fixes for anyone running MLA + quantized KV on
+pre-SM80 hardware. These are the bug fixes upstream lacks; they work
+on any llama.cpp deployment regardless of which models you target.
+
+- **MLA quantized-K graph fix** — unblocks `--cache-type-k iq4_nl`
+  on all MLA models (Mistral Large 3, DeepSeek R1/V2/V3, Kimi K2/K2.5)
+- **CUDA CPY dispatches for IQ4_NL → F32 / F16** — fused dequant + cast
+- **Non-contiguous same-type quant copy kernel** — fixes a load-time
+  crash when the server's speculative probe encounters reshape/flatten
+  copies with quantized data
+
+## What's distributed as a binary
+
+Proprietary extensions are built on top of this public branch and shipped
+as a stripped release bundle. Not source-available.
+
+- **TBQ3_1 / TBQ3_2 KV cache compression** (3-bit and 3.5-bit) — CPU and
+  CUDA implementations, Pascal-compatible, including a fused rotated-
+  domain matvec kernel for MLA ("Lane B") that closes most of the gap
+  to IQ4_NL's throughput
+- **EAGLE v1/v2 speculative decoding** — custom `eagle3_ds` architecture
+  with MLA + MoE, auto-detects EAGLE method from GGUF metadata
+- **MTP / NextN speculative decoding** — converter (`convert_hf_to_gguf.py`)
+  and server runtime for DeepSeek R1/V3/V2
+
+See a release bundle's `NOTICE` for full copyright / license terms.
+Contact **Jay.Brame@SkylarkSoftware.me** for binary access and
+licensing inquiries.
+
+## The MIT fixes in detail
+
+### MLA V-cast graph fix
 
 **Mainline bug**: at MLA's non-FA attention node, V is a view of the
 quantized K cache. `ggml_cuda_cpy` hits
@@ -34,14 +96,14 @@ because Pascal's fp16 compute tax outweighs the halved bandwidth.
 Affects: DeepSeek R1/V2/V3, Mistral Large 3, Kimi K2/K2.5 with
 `--cache-type-k iq4_nl` on P40-class hardware.
 
-### 2. CUDA CPY dispatches for IQ4_NL → F32 / F16
+### CUDA CPY dispatches for IQ4_NL → F32 / F16
 
 Mainline only had quant-to-quant CPY. With the V-cast fix above we need
 IQ4_NL → F32 (and F16). Adds `ggml_cuda_op_cpy_iq4_nl_f32` and the F16
 variant — dequant + cast in a single kernel. Keeps the dequant on GPU
 instead of round-tripping through CPU.
 
-### 3. Non-contiguous same-type quant copy
+### Non-contiguous same-type quant copy
 
 **Mainline bug**: server's `common_speculative_is_compat` load-time
 probe schedules `iq4_nl → iq4_nl` with non-contiguous strides. The
@@ -65,20 +127,11 @@ cmake --build build --target llama-server -j
 
 Verified on CUDA 12.x with SM61 (Pascal P40) through SM90 (Hopper).
 
-## Binary distribution
-
-A pre-built binary including the proprietary KV compression (TBQ3_1,
-TBQ3_2 with Lane B fused matvec) and custom speculative decoding
-extensions is distributed separately. Binary releases include a
-`NOTICE` file with MIT attribution for llama.cpp and proprietary
-copyright for the Skylark additions. Contact **Jay.Brame@SkylarkSoftware.me**
-for access and licensing inquiries.
-
 ## Relationship to upstream
 
 Based on upstream llama.cpp. This branch is shared under MIT so
-anyone needing these fixes can use the branch directly or lift
-individual commits into their own work.
+anyone needing these fixes can use it directly or lift individual
+commits into their own work.
 
 ----
 
