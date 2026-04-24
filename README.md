@@ -9,18 +9,65 @@ GTX 1080/1080 Ti — where upstream's Flash Attention can't reach MLA's
 `head_dim=576` and quantized K-cache configurations crash without
 additional graph fixes.
 
-## What this enables
+## Featured capability — 3-bit KV cache compression *(binary)*
+
+Mainline llama.cpp's smallest KV cache quantization is **IQ4_NL at 4.5
+bits per weight**. This fork's binary distribution includes two novel
+3-bit KV cache types built on Google's TurboQuant algorithm (ICLR
+2026), Pascal-compatible end-to-end:
+
+| Type | bits/weight | vs f16 | vs IQ4_NL | PPL penalty |
+|---|---|---|---|---|
+| **TBQ3_1** | **3.125** | **5.12× smaller** | **30% smaller** | **+2.27%** |
+| TBQ3_2 | 3.5 | 4.57× smaller | 22% smaller | +2.44% |
+
+- **Quality-preserving**: on Mistral Small 24B (wiki.test.raw, 30
+  chunks, ctx=512), perplexity rises only 2.27% from 5.3663 to 5.4881
+  at 5.12× compression. Error bars overlap f16 on many prompts.
+- **Pascal (SM61) compatible**: no Flash Attention requirement,
+  works on P40 / P100 / GTX 1080 class hardware.
+- **CPU path often faster than GPU**: on Mistral Small 24B @ 32K ctx
+  the TBQ3_1 CPU KV path delivers 15.9 tok/s — actually beating
+  IQ4_NL GPU KV at 15.4 tok/s — because fused CPU FlashAttention
+  amortizes the dequant cost better than the separate CUDA MUL_MAT
+  path can.
+- **MLA-ready**: TBQ3_2 (block=32) works on DeepSeek and Mistral
+  Large 3's MLA head_dim=576. A fused rotated-domain matvec kernel
+  ("Lane B") closes most of the throughput gap to IQ4_NL.
+
+This is the only 3-bit KV cache implementation we know of for
+pre-Ampere NVIDIA hardware.
+
+## Featured capability — speculative decoding for massive MoE models *(binary)*
+
+Native support for the two speculative decoding methods that ship with
+modern MLA-architecture draft heads — neither available in upstream
+llama.cpp for these specific model families.
+
+| Method | Target model | Draft head source | Measured acceptance |
+|---|---|---|---|
+| **MTP / NextN** | DeepSeek R1 (671B) | built-in `nextn_layer_parameters` | **47%** at 3.90 tok/s (+4.6% vs baseline) |
+| **EAGLE v1** | Mistral Large 3 (675B) | [Mistral Eagle head on HF](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle) | **64.5%** (validated correct; net-zero on 1085-split MoE target) |
+| EAGLE v2 | eagle3_ds arch | any compatible | supported |
+
+- **Custom `eagle3_ds` architecture** — handles MLA (`kv_lora_rank=512`,
+  `head_dim=576`) + MoE target models in a single decoder graph.
+- **Auto-detection** of EAGLE method from GGUF metadata
+  (`eagle_method = "eagle"` → v1; no metadata → Eagle-3).
+- **GGUF converter** for Mistral Eagle and DeepSeek R1 NextN draft heads,
+  including FP8 dequantization and block-wise weight scale handling.
+- **Server-mode fixes** that mainline's `llama-server` lacked: target
+  model auto-setup for draft feature extraction, `eagle3_n_past` reset
+  between requests (fixed a second-request crash), and correct encoder
+  FC sizing for v1 vs MTP modes.
+
+## What else this enables
 
 - **Trillion-parameter MoE inference on 4× P40 (~$2K of hardware)** —
   Kimi K2.5 (1T parameters, 32B active) runs at 4.72 tok/s with vision.
 - **MLA quantized K cache actually works on Pascal** — upstream crashes
   at load time (`unsupported type combination (iq4_nl to iq4_nl)`); the
   MIT fixes on this branch make it run.
-- **Speculative decoding for modern draft architectures** (binary
-  distribution): EAGLE v1/v2 for Mistral Large 3, MTP/NextN for DeepSeek
-  R1/V3.
-- **3-bit KV cache compression** (binary distribution): up to 5.12×
-  compression vs f16 with measured ≤2.5% PPL degradation.
 
 ## Measured performance (Tesla P40, SM61)
 
