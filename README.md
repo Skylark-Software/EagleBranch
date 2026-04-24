@@ -53,12 +53,6 @@ block index through each tensor's own block layout (mirrors
 `ggml_compute_forward_dup_bytes` on CPU). Block identity is ordinal
 (src block N → dst block N), so it works across reshape/flatten copies.
 
-## Upstream PR notes
-
-See [UPSTREAM_PR_NOTES.md](./UPSTREAM_PR_NOTES.md) for a PR-ready
-write-up of the MLA V-cast fix with repro steps, minimal diff, and
-test coverage notes.
-
 ## Building
 
 Same as upstream — this branch is a superset of a specific upstream
@@ -82,13 +76,9 @@ for access and licensing inquiries.
 
 ## Relationship to upstream
 
-- Based on upstream llama.cpp + EAGLE-3 PR #18039 base
-- Syncs from upstream via `git merge` periodically (not via PRs)
-- No attempts to upstream these fixes directly (some fall under
-  AI-authorship restrictions in the upstream `AGENTS.md`); the work
-  is shared under MIT here so others can pick it up, lift the
-  individual commits into a human-authored PR, or use the branch
-  directly
+Based on upstream llama.cpp. This branch is shared under MIT so
+anyone needing these fixes can use the branch directly or lift
+individual commits into their own work.
 
 ----
 
