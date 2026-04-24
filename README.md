@@ -1,4 +1,6 @@
-<a href="https://skylarksoftware.me"><img src="https://skylarksoftware.me/images/skylark-software-logo.svg" alt="Skylark Software" align="right" height="80"></a>
+<p align="center">
+  <a href="https://skylarksoftware.me"><img src="https://skylarksoftware.me/images/skylark-software-logo.svg" alt="Skylark Software" height="200"></a>
+</p>
 
 # EagleBranch
 
