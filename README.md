@@ -4,19 +4,7 @@
 
 # EagleBranch
 
-**TurboQuant 3-bit KV cache compression and speculative decoding with EAGLE or NextN for
-llama.cpp — designed for legacy hardware, CPU inference and current hardware.**
-
-A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) with two
-flagship extensions beyond the MIT bug fixes on this branch:
-
-- **TurboQuant 3-bit KV cache compression** — 5× smaller than f16 KV
-  with measured +2.27% PPL, first-of-its-kind for pre-Ampere NVIDIA
-- **EAGLE v1/v2/v3 speculative decoding** for modern MLA draft heads
-  (Mistral Large 3 Eagle, DeepSeek R1 NextN/MTP)
-
-Both are distributed as binary; see [binary distribution](#binary-distribution)
-below.
+EagleBranch is a [llama.cpp](https://github.com/ggml-org/llama.cpp) fork with TurboQuant 3-bit KV cache compression and speculative decoding (EAGLE v1/v2/v3, NextN/MTP) for current, legacy, and CPU inference. Includes multiple bug fixes that enable legacy NVIDIA hardware and a fused rotated-domain matvec kernel ("Lane B") that closes most of the throughput gap to IQ4_NL on MLA models.
 
 ## Hardware targets
 
