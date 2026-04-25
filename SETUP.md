@@ -2,6 +2,14 @@
 
 Step-by-step install + first-run for Linux x86_64 with NVIDIA GPUs.
 
+## 0. Download
+
+📦 **[v1.0 release page](https://github.com/Skylark-Software/EagleBranch/releases/tag/v1.0)** (bundle is ~183 MB)
+
+```bash
+curl -LO https://github.com/Skylark-Software/EagleBranch/releases/download/v1.0/skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
+```
+
 ## 1. Verify your system
 
 ```bash

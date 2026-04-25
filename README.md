@@ -6,6 +6,25 @@
 
 EagleBranch is a [llama.cpp](https://github.com/ggml-org/llama.cpp) fork with TurboQuant 3-bit KV cache compression and speculative decoding (EAGLE v1/v2/v3, NextN/MTP) for current, legacy, and CPU inference. Includes multiple bug fixes that enable legacy NVIDIA hardware and a fused rotated-domain matvec kernel ("Lane B") that closes most of the throughput gap to IQ4_NL on MLA models.
 
+## Download
+
+📦 **[Download v1.0 (Linux x86_64 + CUDA, 183 MB)](https://github.com/Skylark-Software/EagleBranch/releases/download/v1.0/skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz)**
+
+[All releases](https://github.com/Skylark-Software/EagleBranch/releases) · [v1.0 release notes](https://github.com/Skylark-Software/EagleBranch/releases/tag/v1.0) · [Step-by-step setup guide (SETUP.md)](./SETUP.md)
+
+```bash
+# Quick install — verify, extract, smoke test
+curl -LO https://github.com/Skylark-Software/EagleBranch/releases/download/v1.0/skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
+echo "c72343171866942bbdd506cf1c9ee2c8aa3f77f95c2e2e5bb6d34e563ea13cf7  skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz" | sha256sum -c
+tar -xzf skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
+cd skylark-llama-server-v1.0-linux-x86_64-cuda
+./llama-server --version
+```
+
+See [SETUP.md](./SETUP.md) for full step-by-step instructions including
+hardware checks, GPU compatibility verification, model downloads, and
+first-inference examples.
+
 ## Hardware targets
 
 - **Pre-SM80 NVIDIA GPUs** — Pascal P40, P100, GTX 1080/1080 Ti —
