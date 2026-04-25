@@ -51,9 +51,12 @@ Examples:
 
 ## 3. Verify the download
 
+The expected SHA256 is published on the [v1.0 release page](https://github.com/Skylark-Software/EagleBranch/releases/tag/v1.0)
+(scroll to the "SHA256:" line in the release notes).
+
 ```bash
 sha256sum skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
-# expect: c9b4948f7cefe3e5eb5f8a69baae25e2be8e4868362b6efb9647f11f3ea1d438
+# Compare the output against the SHA256 in the release notes.
 ```
 
 If it doesn't match, redownload — the file is corrupted or tampered with.
