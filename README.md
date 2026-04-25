@@ -15,7 +15,7 @@ EagleBranch is a [llama.cpp](https://github.com/ggml-org/llama.cpp) fork with Tu
 ```bash
 # Quick install — verify, extract, smoke test
 curl -LO https://github.com/Skylark-Software/EagleBranch/releases/download/v1.0/skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
-echo "c72343171866942bbdd506cf1c9ee2c8aa3f77f95c2e2e5bb6d34e563ea13cf7  skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz" | sha256sum -c
+echo "fd99d81e0d46047c890ea13b188b046b28a2f7411c9a13e41d771321cf14addb  skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz" | sha256sum -c
 tar -xzf skylark-llama-server-v1.0-linux-x86_64-cuda.tar.gz
 cd skylark-llama-server-v1.0-linux-x86_64-cuda
 ./llama-server --version
