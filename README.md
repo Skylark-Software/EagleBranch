@@ -148,7 +148,7 @@ as a stripped release bundle. Not source-available.
   and server runtime for DeepSeek R1/V3/V2
 
 See a release bundle's `NOTICE` for full copyright / license terms.
-Contact **Jay.Brame@SkylarkSoftware.me** for binary access and
+Contact **info@skylarksoftware.me** for binary access and
 licensing inquiries.
 
 ## The MIT fixes in detail
