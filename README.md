@@ -25,6 +25,37 @@ See [SETUP.md](./SETUP.md) for full step-by-step instructions including
 hardware checks, GPU compatibility verification, model downloads, and
 first-inference examples.
 
+## Usage
+
+Once the server is running (default `http://localhost:8080`), it speaks
+the **OpenAI-compatible Chat Completions API** — any OpenAI client
+library works by pointing `base_url` at it:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="local")
+
+response = client.chat.completions.create(
+    model="local",
+    messages=[{"role": "user", "content": "Hello!"}],
+    max_tokens=60,
+)
+print(response.choices[0].message.content)
+```
+
+Or via curl:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"Hello!"}],"max_tokens":60}'
+```
+
+See [USAGE.md](./USAGE.md) for streaming, native llama.cpp endpoints,
+generation parameters, speculative decoding (`-md draft.gguf`),
+multimodal/vision (`--mmproj`), multi-instance setup, and other
+practical patterns.
+
 ## Hardware targets
 
 - **Pre-SM80 NVIDIA GPUs** — Pascal P40, P100, GTX 1080/1080 Ti —
