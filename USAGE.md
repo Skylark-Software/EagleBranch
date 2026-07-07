@@ -4,6 +4,10 @@ Practical examples of how to actually talk to the server once it's
 running. Assumes you've followed [SETUP.md](./SETUP.md) and have
 `llama-server` listening on `http://localhost:8080`.
 
+> Looking for the **launch switches** instead? KV-cache compression types
+> (`--cache-type-*`, TurboQuant) are in [kv-cache-guide.md](./kv-cache-guide.md);
+> speculative decoding (`--eagle3`, draft models) is in [EAGLE3.md](./EAGLE3.md).
+
 ## Web UI
 
 The simplest path: open `http://localhost:8080` in any browser. Built-in

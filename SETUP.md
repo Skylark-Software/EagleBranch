@@ -27,6 +27,24 @@ If `nvidia-smi` reports a driver version of **535.x or newer** (CUDA 12.2+),
 you're good. Older drivers won't load this binary because it's compiled for
 CUDA 12+ runtime ABIs.
 
+```bash
+# CUDA 12 runtime libraries — the driver alone is NOT enough
+ldconfig -p | grep -E 'libcudart\.so\.12|libcublas\.so\.12'
+```
+
+The bundle ships the llama/ggml libraries but **not the CUDA runtime** — the
+binary needs `libcudart.so.12` and `libcublas.so.12` from your system. If the
+check above prints nothing:
+
+- **Ubuntu/Debian:** `sudo apt install cuda-cudart-12-* libcublas-12-*`
+  (or the meta package `cuda-runtime-12-x` from NVIDIA's repo)
+- **Fedora/RHEL:** `sudo dnf install cuda-cudart libcublas` from NVIDIA's CUDA repo
+  (any 12.x version)
+
+⚠️ **CUDA 13 does not satisfy this** — it provides `libcudart.so.13`, and the
+binary is linked against the `.so.12` ABI. CUDA 12.x must be present (both can
+coexist; the loader picks the right one).
+
 ## 2. Verify supported GPU
 
 This binary contains compiled SASS for compute capabilities **6.1, 7.0, 7.5,
@@ -160,6 +178,12 @@ Specifics depend on your GPU memory and CPU RAM. Start with the upstream
 [llama.cpp docs on tensor-split + MoE expert pinning](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md).
 
 ## Troubleshooting
+
+### "error while loading shared libraries: libcudart.so.12: cannot open shared object file"
+
+The CUDA 12 **runtime libraries** aren't installed (the driver alone doesn't
+provide them, and CUDA 13's `.so.13` doesn't satisfy the `.so.12` link). See
+step 1 above for install commands.
 
 ### "CUDA error: forward compatibility was attempted"
 

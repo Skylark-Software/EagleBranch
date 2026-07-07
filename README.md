@@ -4,7 +4,13 @@
 
 # EagleBranch
 
-EagleBranch is a [llama.cpp](https://github.com/ggml-org/llama.cpp) fork with TurboQuant 3-bit KV cache compression and speculative decoding (EAGLE v1/v2/v3, NextN/MTP) for current, legacy, and CPU inference. Includes multiple bug fixes that enable legacy NVIDIA hardware and a fused rotated-domain matvec kernel ("Lane B") that closes most of the throughput gap to IQ4_NL on MLA models.
+**A [llama.cpp](https://github.com/ggml-org/llama.cpp) fork by
+[Skylark Software](https://skylarksoftware.me) for running large language
+models on modest and legacy NVIDIA hardware** — the GPUs mainline has moved
+past (Pascal P40/P100/GTX 10xx) and the memory budgets that force hard
+context-length trade-offs.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 ## Download
 
@@ -21,249 +27,108 @@ cd skylark-llama-server-v1.0-linux-x86_64-cuda
 ./llama-server --version
 ```
 
-See [SETUP.md](./SETUP.md) for full step-by-step instructions including
-hardware checks, GPU compatibility verification, model downloads, and
-first-inference examples.
+The prebuilt binary includes TurboQuant; requires the CUDA 12 **runtime
+libraries**, not just the driver — see [SETUP.md](./SETUP.md) step 1.
+
+## What it does
+
+Three things, independently useful:
+
+| Pillar | What you get | Where |
+|---|---|---|
+| **TurboQuant KV cache** | 3-bit/4-bit KV-cache compression (`tbq3_1`, `tbq3_2`, `tbq4_1`): up to **5.12× smaller KV vs f16** at ~2% PPL cost — e.g. 4 × 32K contexts on a single 24 GB P40. Includes the Lane B fused kernel for MLA models. | **Release binaries only** (proprietary) |
+| **EAGLE/MTP speculative decoding** | `--eagle3`: draft-head speculation for Mistral Large 3, DeepSeek R1/V3/V2 (EAGLE v1/v2, Eagle-3, NextN/MTP) with identical outputs | Open source (this branch) + binaries |
+| **Legacy hardware enablement** | Pascal (SM 6.1) fixes and tuning mainline won't take: working MLA path, quantized-KV rules that respect Pascal's flash-attention limits, multi-GPU MoE placement recipes | Open source (this branch) + binaries |
+
+**Fastest start:** download the prebuilt
+[`skylark-llama-server` release](https://github.com/Skylark-Software/EagleBranch/releases)
+(includes TurboQuant) and follow **[SETUP.md](SETUP.md)**. Building from this
+source gives you everything except the `tbq*` cache types.
+
+## Documentation
+
+| Doc | Covers |
+|---|---|
+| [SETUP.md](SETUP.md) | install, GPU/driver/CUDA requirements, first run |
+| [USAGE.md](USAGE.md) | talking to the server (OpenAI-compatible API, streaming) |
+| [kv-cache-guide.md](kv-cache-guide.md) | **the switch reference** — every `--cache-type-*` value, MHA vs MLA rules, measured speed/quality tables |
+| [EAGLE3.md](EAGLE3.md) | speculative decoding: draft heads, flags, honest performance guidance |
+
+Licensing, commercial use, source access: **info@skylarksoftware.me**
+
+---
+
+## EAGLE3-DS architecture — technical notes
+
+The `eagle3` branch introduces a new **`eagle3_ds`** architecture (EAGLE3-DeepSeekV2) that supports both EAGLE v1/v2 and Eagle-3 style speculative decoding for models using the DeepSeek V2 architecture (MLA attention + MoE), including:
+
+- **Mistral Large 3** (675B) — EAGLE v1/v2 via [Mistral Eagle head](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle)
+- **DeepSeek R1** (671B) — Eagle-3/MTP via [DeepSeek-R1-NextN](https://huggingface.co/lmsys/DeepSeek-R1-NextN)
+- **DeepSeek V3** (671B) — Eagle-3/MTP via built-in NextN/MTP module
+- **DeepSeek V2** (236B) — any compatible EAGLE draft head
+
+### Key changes (13 files, 3 commits)
+
+1. **EAGLE3_DS architecture** — Full decoder implementation with MLA (Multi-head Latent Attention) and MoE (Mixture of Experts) support, matching the target model's DeepSeek V2 architecture
+2. **EAGLE v1/v2 mode** — The Mistral Eagle head uses EAGLE v1 (`FC(concat(embedding, final_hidden_state))`), not Eagle-3 multi-layer feature extraction. The fork auto-detects the method from GGUF metadata (`eagle_method = "eagle"`)
+3. **result_norm extraction** — Captures post-norm final hidden states from the target model for EAGLE v1 autoregressive drafting
+4. **GGUF conversion** — `convert_hf_to_gguf.py` handles Mistral Eagle → eagle3_ds conversion with automatic method detection
+
+### Files modified
+
+| File | Description |
+|------|-------------|
+| `src/models/eagle3_ds.cpp` | EAGLE3-DS decoder graph (MLA + MoE + EAGLE v1/v3 dual mode) |
+| `common/speculative.cpp` | EAGLE v1 draft loop, skip encoder for v1, g_embeddings wiring |
+| `src/llama-context.cpp` | result_norm capture, extraction, output_all for v1 |
+| `src/llama-model.cpp` | GGUF loading, eagle_is_v1 flag, FC tensor sizing |
+| `convert_hf_to_gguf.py` | Mistral Eagle conversion with method detection |
+| `src/llama-arch.{h,cpp}` | LLM_KV_EAGLE3_METHOD key |
+| `src/llama-hparams.h` | `eagle_is_v1` flag |
+| `src/llama-graph.h` | result_norm fields in eagle3 state |
+| `src/llama-context.h` | API declarations |
+| `include/llama.h` | C API for result_norm access |
+| `gguf-py/gguf/constants.py` | EAGLE3_METHOD constant |
+| `common/arg.cpp` | --no-warmup for speculative example |
+
+## Results
+
+### Mistral Large 3 675B (EAGLE v1)
+
+Tested with Q4_K_M (383 GB) on 4x Tesla P40 + 503 GB RAM:
+
+| Metric | Value |
+|--------|-------|
+| Acceptance rate | **64.5%** (71/110 drafted tokens) |
+| Generation speed | 2.86 tok/s (with speculation) |
+| Baseline (no speculation) | 4.72 tok/s |
+| Draft decoder speed | 141 tok/s on GPU |
+
+The 64.5% acceptance rate confirms the EAGLE v1 implementation is correct. However, speculative decoding does not provide a net throughput improvement for this hardware configuration — the target model's verification cost (1085 graph splits across 4 GPUs + CPU for the massive MoE architecture) dominates, negating the ~2.3x tokens-per-step gain. Speculation would benefit from faster target model inference (more GPU offload or a smaller target model).
 
 ## Usage
 
-Once the server is running (default `http://localhost:8080`), it speaks
-the **OpenAI-compatible Chat Completions API** — any OpenAI client
-library works by pointing `base_url` at it:
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="local")
-
-response = client.chat.completions.create(
-    model="local",
-    messages=[{"role": "user", "content": "Hello!"}],
-    max_tokens=60,
-)
-print(response.choices[0].message.content)
-```
-
-Or via curl:
-
 ```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local","messages":[{"role":"user","content":"Hello!"}],"max_tokens":60}'
+# Convert Mistral Eagle head to GGUF
+python convert_hf_to_gguf.py /path/to/Mistral-Large-3-675B-Instruct-2512-Eagle \
+  --outtype q8_0 --outfile mistral-eagle-v1-q8_0.gguf
+
+# Run speculative decoding
+./build/bin/llama-speculative-simple \
+  -m /path/to/Mistral-Large-3-Q4_K_M.gguf \
+  -md /path/to/mistral-eagle-v1-q8_0.gguf \
+  --eagle3 --no-mmap -devd CUDA3 -ngld 99 \
+  -ngl 4 -c 2048 --draft 8 -n 128 \
+  -p "Write a short essay about the future of artificial intelligence."
 ```
 
-See [USAGE.md](./USAGE.md) for streaming, native llama.cpp endpoints,
-generation parameters, speculative decoding (`-md draft.gguf`),
-multimodal/vision (`--mmproj`), multi-instance setup, and other
-practical patterns.
+## Upstream
 
-## Hardware targets
+This fork is based on llama.cpp build 8150 ([ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)), incorporating [PR #18039](https://github.com/ggml-org/llama.cpp/pull/18039) (Eagle-3 support). All upstream code is licensed under the [MIT License](LICENSE).
 
-- **Pre-SM80 NVIDIA GPUs** — Pascal P40, P100, GTX 1080/1080 Ti —
-  where upstream's Flash Attention can't reach MLA's `head_dim=576`
-  and quantized K-cache configurations crash without additional
-  graph fixes. This is the primary development target.
-- **CPU-only inference** — the 3-bit KV cache makes large KV
-  footprints fit in a fraction of memory, and the fused CPU
-  FlashAttention path outperforms GPU KV on MHA models.
-- **Modern NVIDIA (Ampere / Ada / Hopper)** — also supported; builds
-  cleanly SM61 through SM90.
-- **Apple Silicon (Mac Studio and similar)** — untested. Design
-  concept fits (unified memory + KV compression is ideal for big
-  MoE), but the binary is Linux x86_64 + CUDA — it won't run on
-  macOS as-is. Building from source on macOS would compile, and
-  the EAGLE/MTP speculative decoding runtime is
-  architecture-agnostic, but the TurboQuant kernels are CUDA only;
-  a Metal port would be real work. The CPU path is plain C with
-  no NEON acceleration, so it would be correct but not
-  competitively fast on ARM.
+---
 
-Large MoE models fit well on modest hardware as a side effect of
-the compression: Kimi K2.5 (1T params / 32B active) runs at 4.72
-tok/s on four P40s; Mistral Large 3 (675B) at 3.69 tok/s.
-
-## Featured capability — 3-bit KV cache compression *(binary)*
-
-Mainline llama.cpp's smallest KV cache quantization is **IQ4_NL at 4.5
-bits per weight**. This fork's binary distribution includes two novel
-3-bit KV cache types built on Google's TurboQuant algorithm (ICLR
-2026), Pascal-compatible end-to-end:
-
-| Type | bits/weight | vs f16 | vs IQ4_NL | PPL penalty |
-|---|---|---|---|---|
-| **TBQ3_1** | **3.125** | **5.12× smaller** | **30% smaller** | **+2.27%** |
-| TBQ3_2 | 3.5 | 4.57× smaller | 22% smaller | +2.44% |
-
-- **Quality-preserving**: on Mistral Small 24B (wiki.test.raw, 30
-  chunks, ctx=512), perplexity rises only 2.27% from 5.3663 to 5.4881
-  at 5.12× compression. Error bars overlap f16 on many prompts.
-- **Pascal (SM61) compatible**: no Flash Attention requirement,
-  works on P40 / P100 / GTX 1080 class hardware.
-- **CPU path often faster than GPU**: on Mistral Small 24B @ 32K ctx
-  the TBQ3_1 CPU KV path delivers 15.9 tok/s — actually beating
-  IQ4_NL GPU KV at 15.4 tok/s — because fused CPU FlashAttention
-  amortizes the dequant cost better than the separate CUDA MUL_MAT
-  path can.
-- **MLA-ready**: TBQ3_2 (block=32) works on DeepSeek and Mistral
-  Large 3's MLA head_dim=576. A fused rotated-domain matvec kernel
-  ("Lane B") closes most of the throughput gap to IQ4_NL.
-
-This is the only 3-bit KV cache implementation we know of for
-pre-Ampere NVIDIA hardware.
-
-## Featured capability — speculative decoding for massive MoE models *(binary)*
-
-Native support for the two speculative decoding methods that ship with
-modern MLA-architecture draft heads — neither available in upstream
-llama.cpp for these specific model families.
-
-| Method | Target model | Draft head source | Measured acceptance |
-|---|---|---|---|
-| **MTP / NextN** | DeepSeek R1 (671B) | built-in `nextn_layer_parameters` | **47%** at 3.90 tok/s (+4.6% vs baseline) |
-| **EAGLE v1** | Mistral Large 3 (675B) | [Mistral Eagle head on HF](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle) | **64.5%** (validated correct; net-zero on 1085-split MoE target) |
-| EAGLE v2 | eagle3_ds arch | any compatible | supported |
-
-- **Custom `eagle3_ds` architecture** — handles MLA (`kv_lora_rank=512`,
-  `head_dim=576`) + MoE target models in a single decoder graph.
-- **Auto-detection** of EAGLE method from GGUF metadata
-  (`eagle_method = "eagle"` → v1; no metadata → Eagle-3).
-- **GGUF converter** for Mistral Eagle and DeepSeek R1 NextN draft heads,
-  including FP8 dequantization and block-wise weight scale handling.
-- **Server-mode fixes** that mainline's `llama-server` lacked: target
-  model auto-setup for draft feature extraction, `eagle3_n_past` reset
-  between requests (fixed a second-request crash), and correct encoder
-  FC sizing for v1 vs MTP modes.
-
-## What else this enables
-
-- **Trillion-parameter MoE inference on 4× P40 (~$2K of hardware)** —
-  Kimi K2.5 (1T parameters, 32B active) runs at 4.72 tok/s with vision.
-- **Multimodal vision on 1T-parameter Kimi K2.5 and 675B Mistral Large 3**
-  — both use pixtral-family mmproj encoders on top of MLA text decoders.
-  Kimi K2.5 requires the `kimik25` projector type (upstream PR #19170);
-  Mistral Large 3 uses a 4.9 GB F16 pixtral encoder. Both work end-to-end
-  on Pascal alongside the MIT quantized-K fixes on this branch.
-- **MLA quantized K cache actually works on Pascal** — upstream crashes
-  at load time (`unsupported type combination (iq4_nl to iq4_nl)`); the
-  MIT fixes on this branch make it run.
-
-## Measured performance (Tesla P40, SM61)
-
-### Large MoE models
-
-| Model | Parameters / Active | Hardware | tok/s | Notes |
-|---|---|---|---|---|
-| **Kimi K2.5** (vision) | 1T / 32B | 4× P40 | **4.72** | K=q8_0, V=f16, 131K ctx |
-| **Mistral Large 3** | 675B / 41B | 4× P40 | **3.69** | K=q8_0, V=f16, 16K ctx |
-| Mistral Large 3 | 675B / 41B | 4× P40 | 3.32 | K=iq4_nl, V=f16 — needs fixes in this branch |
-| DeepSeek R1 | 671B / 37B | 4× P40 | 4.00 | K=iq4_nl, V=f16, 6K ctx |
-| DeepSeek V2 Lite | 16B / 2.4B | 1× P40 | **72** | K=iq4_nl, V=f16 |
-
-### KV cache compression — Mistral Small 24B @ 32K ctx
-
-| KV config | tok/s | KV size | Compression | PPL vs f16 |
-|---|---|---|---|---|
-| f16 baseline | 17.5 | 5120 MB | 1× | 0 |
-| IQ4_NL | 15.4 | 1440 MB | 3.56× | +0.52% |
-| TBQ3_1 CPU path *(binary)* | **15.9** | **1000 MB** | **5.12×** | +2.27% |
-
-CPU-path TurboQuant actually **beats GPU KV** on MHA models because
-fused CPU FlashAttention amortizes the dequant cost better than the
-separate CUDA MUL_MAT path.
-
-## What's included on this branch (MIT)
-
-General-purpose fixes for anyone running MLA + quantized KV on
-pre-SM80 hardware. These are the bug fixes upstream lacks; they work
-on any llama.cpp deployment regardless of which models you target.
-
-- **MLA quantized-K graph fix** — unblocks `--cache-type-k iq4_nl`
-  on all MLA models (Mistral Large 3, DeepSeek R1/V2/V3, Kimi K2/K2.5)
-- **CUDA CPY dispatches for IQ4_NL → F32 / F16** — fused dequant + cast
-- **Non-contiguous same-type quant copy kernel** — fixes a load-time
-  crash when the server's speculative probe encounters reshape/flatten
-  copies with quantized data
-
-## What's distributed as a binary
-
-Proprietary extensions are built on top of this public branch and shipped
-as a stripped release bundle. Not source-available.
-
-- **TBQ3_1 / TBQ3_2 KV cache compression** (3-bit and 3.5-bit) — CPU and
-  CUDA implementations, Pascal-compatible, including a fused rotated-
-  domain matvec kernel for MLA ("Lane B") that closes most of the gap
-  to IQ4_NL's throughput
-- **EAGLE v1/v2 speculative decoding** — custom `eagle3_ds` architecture
-  with MLA + MoE, auto-detects EAGLE method from GGUF metadata
-- **MTP / NextN speculative decoding** — converter (`convert_hf_to_gguf.py`)
-  and server runtime for DeepSeek R1/V3/V2
-
-See a release bundle's `NOTICE` for full copyright / license terms.
-Contact **info@skylarksoftware.me** for binary access and
-licensing inquiries.
-
-## The MIT fixes in detail
-
-### MLA V-cast graph fix
-
-**Mainline bug**: at MLA's non-FA attention node, V is a view of the
-quantized K cache. `ggml_cuda_cpy` hits
-`unsupported type combination (iq4_nl to iq4_nl)` when the graph inserts
-`ggml_cont(ggml_transpose(v))` — no backend has a transposed
-quant-to-quant CPY kernel.
-
-**Fix**: insert `ggml_cast(v, F32)` before the transpose+cont in
-`llama-graph.cpp`'s `build_attn_mha` (non-FA branch). Supported via
-`to_fp32_cuda` (see also the new CPY dispatches below). Four commits
-progressively refine this — F16 intermediate was tried but reverted
-because Pascal's fp16 compute tax outweighs the halved bandwidth.
-
-Affects: DeepSeek R1/V2/V3, Mistral Large 3, Kimi K2/K2.5 with
-`--cache-type-k iq4_nl` on P40-class hardware.
-
-### CUDA CPY dispatches for IQ4_NL → F32 / F16
-
-Mainline only had quant-to-quant CPY. With the V-cast fix above we need
-IQ4_NL → F32 (and F16). Adds `ggml_cuda_op_cpy_iq4_nl_f32` and the F16
-variant — dequant + cast in a single kernel. Keeps the dequant on GPU
-instead of round-tripping through CPU.
-
-### Non-contiguous same-type quant copy
-
-**Mainline bug**: server's `common_speculative_is_compat` load-time
-probe schedules `iq4_nl → iq4_nl` with non-contiguous strides. The
-existing same-type path uses `cudaMemcpyAsync` (contiguous only) and
-falls through to the unsupported-combination abort.
-
-**Fix**: `cpy_blck_quant_same` — a generic kernel that walks the linear
-block index through each tensor's own block layout (mirrors
-`ggml_compute_forward_dup_bytes` on CPU). Block identity is ordinal
-(src block N → dst block N), so it works across reshape/flatten copies.
-
-## Building
-
-Same as upstream — this branch is a superset of a specific upstream
-commit, not a refactor. Standard CMake:
-
-```
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target llama-server -j
-```
-
-Verified on CUDA 12.x with SM61 (Pascal P40) through SM90 (Hopper).
-
-## Relationship to upstream
-
-Based on upstream llama.cpp. This branch is shared under MIT so
-anyone needing these fixes can use it directly or lift individual
-commits into their own work.
-
-----
-
-# llama.cpp (upstream — below this point)
-
-![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
-
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+*For the full llama.cpp documentation, see the [upstream repository](https://github.com/ggml-org/llama.cpp).*
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
 [![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
 
